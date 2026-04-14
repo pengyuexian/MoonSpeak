@@ -1,0 +1,10 @@
+name: moonspeak
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+    - azure-cognitiveservices-speech>=1.49.0
+    - whisper-cli>=0.0.5
