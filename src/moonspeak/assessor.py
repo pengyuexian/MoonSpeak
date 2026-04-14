@@ -12,7 +12,7 @@ import azure.cognitiveservices.speech as speechsdk
 class PronunciationAssessor:
     """Assess pronunciation using Azure Speech SDK."""
 
-    def __init__(self, subscription: str = None, region: str = "eastus"):
+    def __init__(self, subscription: str = None, region: str = None):
         """
         Initialize the assessor.
 
@@ -21,7 +21,7 @@ class PronunciationAssessor:
             region: Azure region. Defaults to 'eastus'.
         """
         self.subscription = subscription or os.environ.get("AZURE_SPEECH_KEY")
-        self.region = region or os.environ.get("AZURE_SPEECH_REGION", "eastus")
+        self.region = region or os.environ.get("AZURE_SPEECH_REGION", "westus")
 
         if not self.subscription:
             raise ValueError(
@@ -85,7 +85,7 @@ class PronunciationAssessor:
                 words.append({
                     "word": word_result.word,
                     "error_type": word_result.error_type,
-                    "score": round(word_result.score, 1) if hasattr(word_result, 'score') else None
+                    "score": round(word_result.accuracy_score, 1) if hasattr(word_result, 'accuracy_score') else None
                 })
 
         assessment = {

@@ -1,5 +1,4 @@
 # Byte-compiled / optimized / DLL files
-__pycache__/
 *.py[cod]
 *$py.class
 
@@ -9,7 +8,6 @@ build/
 *.egg-info/
 
 # Virtual environments
-.env
 .venv
 env/
 venv/
@@ -35,3 +33,16 @@ htmlcov/
 # API keys (if saved locally)
 *.key
 secrets.json
+
+# Environment
+.env
+
+# Books and media
+books/
+test_audio/
+evaluations/
+
+# Test files
+test_*.py
+*.pyc
+__pycache__/

@@ -6,16 +6,20 @@ MoonSpeak is an open-source project created by [月弦 (Moon)](https://github.co
 
 ## Features
 
-- 🎙️ **Voice Input** — Kids record their reading/pronunciation exercises
-- 📝 **Speech-to-Text** — Whisper-powered accurate transcription
-- 🎯 **Pronunciation Assessment** — Azure AI delivers precise pronunciation scoring
-- 💬 **AI Feedback** — Combined grammar + pronunciation analysis
-- 📱 **iMessage Ready** — Integrates with Apple Messages for seamless workflow
+- 🎙️ **Voice Input** — Kids record their reading via iMessage
+- 🎯 **Pronunciation Assessment** — Azure Speech SDK delivers precise scoring
+- 🧠 **AI Reference Inference** — GLM-4 intelligently infers reference text
+- 💬 **Kid-Friendly Feedback** — Encouraging, actionable feedback
+- ☁️ **Cloud-Native** — Uses Azure Speech + GLM API
 
 ## How It Works
 
 ```
-Record Audio → Whisper Transcribes → Azure Scores Pronunciation → AI Provides Feedback
+Audio (.m4a) → Azure Transcription → Whisper Transcription
+                                              ↓
+                                    AI Infers Reference Text
+                                              ↓
+                              Azure Pronunciation Scoring + Feedback
 ```
 
 ## Quick Start
@@ -27,37 +31,56 @@ cd MoonSpeak
 
 # Create conda environment
 conda env create -f environment.yml
-
-# Activate environment
 conda activate moonspeak
 
-# Configure Azure credentials
-export AZURE_SPEECH_KEY=your_key_here
-export AZURE_SPEECH_REGION=eastus
+# Configure credentials in .env
+AZURE_SPEECH_KEY=your_key
+AZURE_SPEECH_REGION=westus
+GLM_API_KEY=your_glm_key
 
-# Run assessment
-python -m moonspeak assess path/to/audio.m4a "The text to compare against"
+# Run pipeline
+python -c "
+import sys; sys.path.insert(0, 'src')
+from moonspeak.pipeline import assess_audio
+result = assess_audio('path/to/audio.m4a')
+print(result['feedback'])
+"
 ```
 
 ## Project Structure
 
 ```
 MoonSpeak/
+├── .env                    # API keys (git-ignored)
+├── .gitignore
 ├── src/
-│   └── moonspeak/           # Main package
-├── tests/                   # Unit tests
-├── docs/                   # Documentation
-├── environment.yml         # Conda environment
-├── setup.py               # Package setup
+│   └── moonspeak/
+│       ├── __init__.py
+│       ├── pipeline.py      # Main assessment pipeline
+│       ├── assessor.py      # Azure pronunciation scoring
+│       └── transcriber.py  # Whisper transcription
+├── books/                  # Oxford Reading Tree materials (git-ignored)
+├── evaluations/            # Daily evaluation results
+│   └── YYYY-MM-DD/
+│       ├── audio/          # Student's audio files
+│       └── report.md       # Evaluation report
+├── environment.yml
+├── setup.py
 └── README.md
 ```
 
-## For Parents
+## Configuration
 
-MoonSpeak helps kids who are learning English by:
-- Making pronunciation practice more engaging
-- Providing instant, constructive feedback
-- Encouraging regular practice through familiar tools (iMessage)
+Copy `.env.example` to `.env` and fill in your credentials:
+
+```bash
+# Azure Speech Services
+AZURE_SPEECH_KEY=your_azure_key
+AZURE_SPEECH_REGION=westus
+
+# GLM API (智谱)
+GLM_API_KEY=your_glm_key
+```
 
 ## License
 
