@@ -5,6 +5,7 @@ from pathlib import Path
 
 from server.data_loader import (
     build_evaluation_paths,
+    build_word_detail_cn,
     align_standard_text_with_azure,
     classify_word_color,
     parse_feedback_cn_markdown,
@@ -119,6 +120,20 @@ class SpeechServerAlignmentTests(unittest.TestCase):
         self.assertEqual("yellow", lines[0]["tokens"][0]["color"])
         self.assertEqual("green", lines[0]["tokens"][2]["color"])
 
+    def test_build_word_detail_cn_formats_omission_and_mispronunciation_branches(self) -> None:
+        self.assertEqual(
+            "这个词这次漏读了。当前分数：0",
+            build_word_detail_cn({"error_type": "Omission", "score": 0}),
+        )
+        self.assertEqual(
+            "这个词读得不太清楚，还需要重点练习。当前分数：20",
+            build_word_detail_cn({"error_type": "Mispronunciation", "score": 20}),
+        )
+        self.assertEqual(
+            "这个词还不够稳定，可以再放慢一点读。当前分数：58",
+            build_word_detail_cn({"error_type": "Mispronunciation", "score": 58}),
+        )
+
 
 class SpeechServerLoaderTests(unittest.TestCase):
     def test_load_speech_review_page_data_reads_all_artifacts(self) -> None:
@@ -126,13 +141,13 @@ class SpeechServerLoaderTests(unittest.TestCase):
             base = Path(tmp_dir) / "evaluations" / "2026-04-14"
             base.mkdir(parents=True)
             (base / "Read_PB58.standard.txt").write_text(
-                "The Friendly Farm,\nGracie! What are you eating?\n",
+                "The Friendly Farm,\nGracie! What are you eating?\nGhost\n",
                 encoding="utf-8",
             )
             (base / "Read_PB58.azure.json").write_text(
                 json.dumps(
                     {
-                        "reference_text": "The Friendly Farm,\nGracie! What are you eating?\n",
+                        "reference_text": "The Friendly Farm,\nGracie! What are you eating?\nGhost\n",
                         "recognized_text": "The Friendly farm. Gracie. What are you eating?",
                         "scores": {
                             "pronunciation": 71.6,
@@ -169,8 +184,12 @@ class SpeechServerLoaderTests(unittest.TestCase):
         self.assertEqual(["5.05"], data["matched_tracks"])
         self.assertEqual(["发音：71.6/100"], data["score_lines_cn"])
         self.assertEqual(["你这次一直坚持读完了。"], data["feedback_lines_cn"])
-        self.assertEqual(2, len(data["standard_lines"]))
+        self.assertEqual(3, len(data["standard_lines"]))
         self.assertEqual(
             "这个词整体比较稳定。当前分数：94",
             data["standard_lines"][0]["tokens"][0]["detail_text_cn"],
+        )
+        self.assertEqual(
+            "",
+            data["standard_lines"][2]["tokens"][0]["detail_text_cn"],
         )

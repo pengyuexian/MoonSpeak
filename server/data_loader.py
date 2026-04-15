@@ -129,8 +129,10 @@ def load_speech_review_page_data(
     aligned_lines = align_standard_text_with_azure(standard_text, azure_data.get("words", []))
     for line in aligned_lines:
         for token in line["tokens"]:
-            if token.get("kind") == "word" and isinstance(token.get("detail"), dict):
-                token["detail_text_cn"] = build_word_detail_cn(token["detail"])
+            if token.get("kind") != "word":
+                continue
+            detail = token.get("detail")
+            token["detail_text_cn"] = build_word_detail_cn(detail) if isinstance(detail, dict) else ""
     return {
         "name": name,
         "date": date,
