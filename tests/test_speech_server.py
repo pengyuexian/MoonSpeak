@@ -1,3 +1,5 @@
+import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -6,6 +8,7 @@ from server.data_loader import (
     align_standard_text_with_azure,
     classify_word_color,
     parse_feedback_cn_markdown,
+    load_speech_review_page_data,
 )
 
 
@@ -115,3 +118,59 @@ class SpeechServerAlignmentTests(unittest.TestCase):
         self.assertEqual("word", lines[0]["tokens"][2]["kind"])
         self.assertEqual("yellow", lines[0]["tokens"][0]["color"])
         self.assertEqual("green", lines[0]["tokens"][2]["color"])
+
+
+class SpeechServerLoaderTests(unittest.TestCase):
+    def test_load_speech_review_page_data_reads_all_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base = Path(tmp_dir) / "evaluations" / "2026-04-14"
+            base.mkdir(parents=True)
+            (base / "Read_PB58.standard.txt").write_text(
+                "The Friendly Farm,\nGracie! What are you eating?\n",
+                encoding="utf-8",
+            )
+            (base / "Read_PB58.azure.json").write_text(
+                json.dumps(
+                    {
+                        "reference_text": "The Friendly Farm,\nGracie! What are you eating?\n",
+                        "recognized_text": "The Friendly farm. Gracie. What are you eating?",
+                        "scores": {
+                            "pronunciation": 71.6,
+                            "accuracy": 70.0,
+                            "fluency": 77.0,
+                            "completeness": 71.0,
+                        },
+                        "words": [
+                            {"word": "The", "error_type": "None", "score": 94.0},
+                            {"word": "Friendly", "error_type": "None", "score": 91.0},
+                            {"word": "Farm", "error_type": "None", "score": 70.0},
+                            {"word": "Gracie", "error_type": "None", "score": 94.0},
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (base / "Read_PB58.feedback.cn.md").write_text(
+                "# 评测报告：Read_PB58\n\n"
+                "## 匹配 Unit\n5\n\n"
+                "## 匹配 Track\n5.05\n\n"
+                "## 评分\n发音：71.6/100\n\n"
+                "## 反馈\n你这次一直坚持读完了。\n",
+                encoding="utf-8",
+            )
+            (base / "Read_PB58.feedback.md").write_text("# noop\n", encoding="utf-8")
+
+            data = load_speech_review_page_data(Path(tmp_dir) / "evaluations", "2026-04-14", "Read_PB58")
+
+        self.assertEqual("Read_PB58", data["name"])
+        self.assertEqual("2026-04-14", data["date"])
+        self.assertEqual("5", data["matched_unit"])
+        self.assertEqual(["5.05"], data["matched_tracks"])
+        self.assertEqual(["发音：71.6/100"], data["score_lines_cn"])
+        self.assertEqual(["你这次一直坚持读完了。"], data["feedback_lines_cn"])
+        self.assertEqual(2, len(data["standard_lines"]))
+        self.assertEqual(
+            "这个词整体比较稳定。当前分数：94",
+            data["standard_lines"][0]["tokens"][0]["detail_text_cn"],
+        )

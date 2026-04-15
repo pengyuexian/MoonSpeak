@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -62,6 +63,19 @@ def classify_word_color(word_result: dict) -> str:
     return "yellow"
 
 
+def build_word_detail_cn(word_result: dict) -> str:
+    error_type = word_result.get("error_type")
+    score = int(float(word_result.get("score", 0) or 0))
+    if error_type == "Omission":
+        return f"这个词这次漏读了。当前分数：{score}"
+    if error_type == "Mispronunciation":
+        if score < 35:
+            return f"这个词读得不太清楚，还需要重点练习。当前分数：{score}"
+        if score < 70:
+            return f"这个词还不够稳定，可以再放慢一点读。当前分数：{score}"
+    return f"这个词整体比较稳定。当前分数：{score}"
+
+
 def _normalize_token(text: str) -> str:
     token = text.replace("’", "'").lower()
     token = re.sub(r"[^a-z0-9']+", "", token)
@@ -103,3 +117,28 @@ def align_standard_text_with_azure(standard_text: str, azure_words: list[dict]) 
                 )
         lines.append({"text": line, "tokens": tokens})
     return lines
+
+
+def load_speech_review_page_data(
+    evaluations_root: Path, date: str, name: str
+) -> dict[str, object]:
+    paths = build_evaluation_paths(evaluations_root, date, name)
+    standard_text = paths["standard"].read_text(encoding="utf-8")
+    azure_data = json.loads(paths["azure"].read_text(encoding="utf-8"))
+    feedback_cn = parse_feedback_cn_markdown(paths["feedback_cn"].read_text(encoding="utf-8"))
+    aligned_lines = align_standard_text_with_azure(standard_text, azure_data.get("words", []))
+    for line in aligned_lines:
+        for token in line["tokens"]:
+            if token.get("kind") == "word" and isinstance(token.get("detail"), dict):
+                token["detail_text_cn"] = build_word_detail_cn(token["detail"])
+    return {
+        "name": name,
+        "date": date,
+        "matched_unit": feedback_cn["matched_unit"],
+        "matched_tracks": feedback_cn["matched_tracks"],
+        "scores": azure_data.get("scores", {}),
+        "score_lines_cn": feedback_cn["score_lines"],
+        "problem_word_lines_cn": feedback_cn["problem_word_lines"],
+        "feedback_lines_cn": feedback_cn["feedback_lines"],
+        "standard_lines": aligned_lines,
+    }
