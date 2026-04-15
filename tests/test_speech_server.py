@@ -1,5 +1,3 @@
-import json
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -24,6 +22,10 @@ class SpeechServerDataTests(unittest.TestCase):
         self.assertEqual(
             base / "2026-04-14" / "Read_PB58.feedback.cn.md",
             paths["feedback_cn"],
+        )
+        self.assertEqual(
+            base / "2026-04-14" / "Read_PB58.feedback.md",
+            paths["feedback_en"],
         )
 
     def test_parse_feedback_cn_markdown_extracts_summary_sections(self) -> None:
