@@ -75,7 +75,13 @@ def align_standard_text_with_azure(standard_text: str, azure_words: list[dict]) 
     lines: list[dict] = []
     for line in standard_text.splitlines():
         tokens = []
-        for raw in re.findall(r"[A-Za-z0-9']+", line):
+        for raw in re.findall(r"[A-Za-z0-9']+|[^A-Za-z0-9'\s]+|\s+", line):
+            if raw.isspace():
+                tokens.append({"text": raw, "kind": "space"})
+                continue
+            if not re.match(r"[A-Za-z0-9']+$", raw):
+                tokens.append({"text": raw, "kind": "punct"})
+                continue
             aligned = None
             normalized_raw = _normalize_token(raw)
             for candidate_index in range(azure_index, len(azure_words)):
@@ -85,7 +91,7 @@ def align_standard_text_with_azure(standard_text: str, azure_words: list[dict]) 
                     azure_index = candidate_index + 1
                     break
             if aligned is None:
-                tokens.append({"text": raw, "kind": "word", "color": "red", "detail": ""})
+                tokens.append({"text": raw, "kind": "word", "color": "neutral", "detail": ""})
             else:
                 tokens.append(
                     {
