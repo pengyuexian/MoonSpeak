@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 
@@ -41,3 +42,58 @@ def parse_feedback_cn_markdown(markdown: str) -> dict[str, object]:
         "problem_word_lines": problem_word_lines,
         "feedback_lines": sections.get("反馈", []),
     }
+
+
+def classify_word_color(word_result: dict) -> str:
+    error_type = word_result.get("error_type")
+    score = float(word_result.get("score", 0) or 0)
+    if error_type == "Omission":
+        return "red"
+    if error_type == "Mispronunciation":
+        if score < 35:
+            return "red"
+        if score < 70:
+            return "yellow"
+        return "green"
+    if score >= 85:
+        return "green"
+    if score >= 70:
+        return "yellow"
+    return "yellow"
+
+
+def _normalize_token(text: str) -> str:
+    token = text.replace("’", "'").lower()
+    token = re.sub(r"[^a-z0-9']+", "", token)
+    if token.endswith("'s"):
+        return token[:-2]
+    return token
+
+
+def align_standard_text_with_azure(standard_text: str, azure_words: list[dict]) -> list[dict]:
+    azure_index = 0
+    lines: list[dict] = []
+    for line in standard_text.splitlines():
+        tokens = []
+        for raw in re.findall(r"[A-Za-z0-9']+", line):
+            aligned = None
+            normalized_raw = _normalize_token(raw)
+            for candidate_index in range(azure_index, len(azure_words)):
+                candidate = azure_words[candidate_index]
+                if _normalize_token(str(candidate.get("word", ""))) == normalized_raw:
+                    aligned = candidate
+                    azure_index = candidate_index + 1
+                    break
+            if aligned is None:
+                tokens.append({"text": raw, "kind": "word", "color": "red", "detail": ""})
+            else:
+                tokens.append(
+                    {
+                        "text": raw,
+                        "kind": "word",
+                        "color": classify_word_color(aligned),
+                        "detail": aligned,
+                    }
+                )
+        lines.append({"text": line, "tokens": tokens})
+    return lines
