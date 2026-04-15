@@ -133,6 +133,56 @@ def load_speech_review_page_data(
                 continue
             detail = token.get("detail")
             token["detail_text_cn"] = build_word_detail_cn(detail) if isinstance(detail, dict) else ""
+
+    # Audio paths
+    repo_root = evaluations_root.parent
+    
+    # 1. Detect Book Level
+    book_level = None
+    # Priority A: Parse from feedback.md (EN)
+    if paths["feedback_en"].exists():
+        en_md = paths["feedback_en"].read_text(encoding="utf-8")
+        level_match = re.search(r"## Matched Level\n+(\d+)", en_md)
+        if level_match:
+            book_level = level_match.group(1)
+
+    # Priority B: Detect based on standard text content (fallback)
+    if not book_level and standard_text:
+        # Extract a reasonably unique snippet (exclude common intro lines)
+        lines = [line.strip() for line in standard_text.splitlines() if line.strip()]
+        search_snippet = lines[min(2, len(lines)-1)] if len(lines) > 2 else lines[0]
+        
+        for level_dir in (repo_root / "books" / "Power_Up").glob("*"):
+            if not level_dir.is_dir(): continue
+            for script in (level_dir / "Audioscripts").glob("*.md"):
+                try:
+                    if search_snippet in script.read_text(encoding="utf-8"):
+                        book_level = level_dir.name
+                        break
+                except:
+                    continue
+            if book_level: break
+
+    # Recording: check .wav then .m4a
+    recording_wav = paths["standard"].parent / f"{name}.wav"
+    recording_m4a = paths["standard"].parent / f"{name}.m4a"
+    recording_url = None
+    if recording_wav.exists():
+        recording_url = f"/audio/user/{date}/{name}.wav"
+    elif recording_m4a.exists():
+        recording_url = f"/audio/user/{date}/{name}.m4a"
+
+    # Track: use detected book level
+    track_url = None
+    if feedback_cn["matched_tracks"] and book_level:
+        match = re.search(r"(\d+\.\d+)", feedback_cn["matched_tracks"][0])
+        if match:
+            track_id = match.group(1)
+            # Only search in the detected book level
+            track_path = repo_root / "books" / "Power_Up" / book_level / "Tracks" / f"{track_id}.mp3"
+            if track_path.exists():
+                track_url = f"/audio/track/{book_level}/{track_id}.mp3"
+
     return {
         "name": name,
         "date": date,
@@ -143,4 +193,6 @@ def load_speech_review_page_data(
         "problem_word_lines_cn": feedback_cn["problem_word_lines"],
         "feedback_lines_cn": feedback_cn["feedback_lines"],
         "standard_lines": aligned_lines,
+        "audio_url_user": recording_url,
+        "audio_url_track": track_url,
     }

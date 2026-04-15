@@ -5,14 +5,15 @@ from html import escape
 
 def render_speech_review_page(data: dict[str, object]) -> str:
     scores = data["scores"]
+    score_specs = [
+        ("score-card-pronunciation", "发音", scores.get("pronunciation", "N/A")),
+        ("score-card-accuracy", "准确度", scores.get("accuracy", "N/A")),
+        ("score-card-fluency", "流利度", scores.get("fluency", "N/A")),
+        ("score-card-completeness", "完整度", scores.get("completeness", "N/A")),
+    ]
     score_cards = "".join(
-        f'<div class="score-card"><div class="score-label">{label}</div><div class="score-value">{value}/100</div></div>'
-        for label, value in [
-            ("Pronunciation", scores.get("pronunciation", "N/A")),
-            ("Accuracy", scores.get("accuracy", "N/A")),
-            ("Fluency", scores.get("fluency", "N/A")),
-            ("Completeness", scores.get("completeness", "N/A")),
-        ]
+        f'<div class="score-card {card_class}"><div class="score-card-label">{label}</div><div class="score-card-value">{value}</div></div>'
+        for card_class, label, value in score_specs
     )
 
     line_blocks: list[str] = []
@@ -32,7 +33,22 @@ def render_speech_review_page(data: dict[str, object]) -> str:
         line_blocks.append(f'<div class="reading-line">{"".join(token_html)}</div>')
 
     feedback_blocks = "".join(f"<p>{escape(line)}</p>" for line in data["feedback_lines_cn"])
-    score_lines = "".join(f"<p>{escape(line)}</p>" for line in data["score_lines_cn"])
+
+    track_url = data.get("audio_url_track")
+    track_btn_html = (
+        f'<button class="audio-btn track-btn" data-type="original" data-url="{track_url}" onclick="playAudio(this, \'{track_url}\')">'
+        '<span class="icon"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></span>'
+        '<span class="label">播放原声</span></button>'
+        if track_url else ""
+    )
+
+    user_url = data.get("audio_url_user")
+    user_btn_html = (
+        f'<button class="audio-btn user-btn" data-type="user" data-url="{user_url}" onclick="playAudio(this, \'{user_url}\')">'
+        '<span class="icon"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></span>'
+        '<span class="label">播放跟读</span></button>'
+        if user_url else ""
+    )
 
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -42,83 +58,211 @@ def render_speech_review_page(data: dict[str, object]) -> str:
   <title>{escape(data["name"])}</title>
   <style>
     :root {{
-      --bg: #f5f1ea;
-      --card: rgba(255,255,255,0.82);
-      --ink: #1f2937;
-      --muted: #6b7280;
-      --green: #d8f2dc;
-      --yellow: #fff2bf;
-      --red: #ffd8d2;
-      --shadow: 0 18px 60px rgba(55, 41, 24, 0.10);
+      --bg: #fcfcf9;
+      --card-bg: #ffffff;
+      --ink: #2d3436;
+      --muted: #636e72;
+      --accent-1: #ffeaa7; /* 发音 - 柔黄色 */
+      --accent-2: #81ecec; /* 准确度 - 柔青色 */
+      --accent-3: #74b9ff; /* 流利度 - 柔蓝色 */
+      --accent-4: #fab1a0; /* 完整度 - 柔橙色 */
+      --shadow: 0 8px 30px rgba(0, 0, 0, 0.04);
     }}
     body {{
       margin: 0;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: radial-gradient(circle at top, #fdf9f2 0%, #f0ebe3 70%);
+      font-family: "Rounded Mplus 1c", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      background-color: var(--bg);
       color: var(--ink);
     }}
     .speech-page {{
-      max-width: 960px;
+      max-width: 800px;
       margin: 0 auto;
-      padding: 24px 16px 64px;
+      padding: 20px 12px;
     }}
     .hero, .card {{
-      background: var(--card);
-      backdrop-filter: blur(10px);
-      border-radius: 28px;
+      background: var(--card-bg);
+      border-radius: 24px;
       box-shadow: var(--shadow);
-      padding: 20px;
+      padding: 24px;
       margin-bottom: 20px;
+      border: 1px solid rgba(0,0,0,0.02);
+    }}
+    .hero p {{
+      font-size: 14px;
+      color: var(--muted);
+      margin-top: 0;
+      margin-bottom: 8px;
+    }}
+    .hero h1 {{
+      font-size: 26px;
+      margin: 0 0 20px 0;
+      font-weight: 800;
+      color: #1a1a1a;
     }}
     .score-grid {{
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      grid-template-columns: repeat(4, 1fr);
       gap: 12px;
-      margin-top: 16px;
     }}
     .score-card {{
+      background: #fafafa;
       border-radius: 18px;
-      padding: 14px;
-      background: rgba(255,255,255,0.75);
+      padding: 14px 8px;
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      border: 2px solid transparent;
+      transition: all 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    }}
+    .score-card:hover {{
+      transform: translateY(-3px);
+      box-shadow: 0 6px 16px rgba(0,0,0,0.06);
+      background: #ffffff;
+    }}
+    .score-card-pronunciation {{ border-color: var(--accent-1); }}
+    .score-card-accuracy {{ border-color: var(--accent-2); }}
+    .score-card-fluency {{ border-color: var(--accent-3); }}
+    .score-card-completeness {{ border-color: var(--accent-4); }}
+    
+    .score-card-label {{
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+    }}
+    .score-card-value {{
+      font-size: 22px;
+      font-weight: 900;
+      color: var(--ink);
+      font-variant-numeric: tabular-nums;
+    }}
+    h2 {{
+      font-size: 20px;
+      margin-top: 0;
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }}
+    h2::before {{
+      content: "";
+      display: inline-block;
+      width: 4px;
+      height: 20px;
+      background: var(--accent-3);
+      border-radius: 2px;
     }}
     .reading-line {{
-      line-height: 1.9;
-      font-size: clamp(20px, 2.5vw, 28px);
-      margin: 0 0 8px;
+      line-height: 1.6;
+      font-size: 26px;
+      margin-bottom: 8px;
       word-break: break-word;
     }}
     .word-chip {{
       border: none;
-      border-radius: 12px;
+      border-radius: 8px;
       padding: 2px 4px;
       font: inherit;
       color: inherit;
+      cursor: pointer;
+      transition: all 0.2s;
       background: transparent;
+      font-weight: 500;
     }}
-    .word-chip.green {{ background: var(--green); }}
-    .word-chip.yellow {{ background: var(--yellow); }}
-    .word-chip.red {{ background: var(--red); }}
-    .word-chip.neutral {{ background: transparent; }}
+    .word-chip:hover {{ transform: scale(1.05); }}
+    .word-chip.green {{ background: #e3f9e5; color: #1b5e20; }}
+    .word-chip.yellow {{ background: #fff9db; color: #f59f00; }}
+    .word-chip.red {{ background: #fff5f5; color: #e03131; }}
+    
     .detail-popover {{
       position: fixed;
-      left: 16px;
-      right: 16px;
-      bottom: 16px;
-      display: none;
-      background: rgba(28, 28, 30, 0.94);
+      left: 50%;
+      transform: translateX(-50%);
+      bottom: 24px;
+      width: calc(100% - 40px);
+      max-width: 420px;
+      background: rgba(45, 52, 54, 0.95);
+      backdrop-filter: blur(8px);
       color: white;
-      border-radius: 18px;
-      padding: 16px;
-      box-shadow: var(--shadow);
+      padding: 18px;
+      border-radius: 20px;
+      display: none;
+      box-shadow: 0 12px 30px rgba(0,0,0,0.25);
+      z-index: 100;
+      text-align: center;
+      animation: slideUp 0.3s ease-out;
+    }}
+    @keyframes slideUp {{
+      from {{ transform: translate(-50%, 20px); opacity: 0; }}
+      to {{ transform: translate(-50%, 0); opacity: 1; }}
     }}
     .detail-popover.visible {{ display: block; }}
-    @media (min-width: 768px) {{
-      .detail-popover {{
-        max-width: 360px;
-        left: auto;
-        right: 24px;
-        bottom: 24px;
-      }}
+    .audio-controls {{
+      margin-top: 24px;
+      display: flex;
+      gap: 12px;
+      padding-top: 16px;
+      border-top: 1px solid rgba(0,0,0,0.05);
+    }}
+    .audio-btn {{
+      position: relative;
+      overflow: hidden;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 20px;
+      border-radius: 999px;
+      border: none;
+      background: #f0f2f5;
+      color: var(--ink);
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.03);
+    }}
+    .audio-btn::before {{
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: var(--progress, 0%);
+      background: rgba(0, 0, 0, 0.06);
+      transition: width 0.1s linear;
+      z-index: 0;
+    }}
+    .audio-btn span, .audio-btn svg {{
+      position: relative;
+      z-index: 1;
+    }}
+    .audio-btn:hover {{
+      background: #e4e7eb;
+      transform: translateY(-2px);
+      box-shadow: 0 6px 16px rgba(0,0,0,0.08);
+    }}
+    .audio-btn:active {{
+      transform: translateY(0);
+    }}
+    .audio-btn svg {{
+      width: 20px;
+      height: 20px;
+      fill: currentColor;
+    }}
+    .audio-btn.track-btn {{
+      background: #e3f2fd;
+      color: #1976d2;
+    }}
+    .audio-btn.track-btn:hover {{ background: #bbdefb; }}
+    .audio-btn.user-btn {{
+      background: #e8f5e9;
+      color: #2e7d32;
+    }}
+    .audio-btn.user-btn:hover {{ background: #c8e6c9; }}
+    
+    .audio-btn.playing {{
+      box-shadow: 0 2px 8px rgba(0,0,0,0.05);
     }}
   </style>
 </head>
@@ -130,18 +274,16 @@ def render_speech_review_page(data: dict[str, object]) -> str:
       <div class="score-grid">{score_cards}</div>
     </section>
     <section class="card">
-      <h2>标准文本</h2>
+      <h2>正文</h2>
       {''.join(line_blocks)}
+      <div class="audio-controls">
+        {track_btn_html}
+        {user_btn_html}
+      </div>
     </section>
     <section class="card">
-      <h2>中文反馈</h2>
-      {score_lines}
+      <h2>反馈</h2>
       {feedback_blocks}
-    </section>
-    <section class="card">
-      <p>绿色：比较稳定</p>
-      <p>黄色：还可以更清楚</p>
-      <p>红色：这次要重点练习</p>
     </section>
   </main>
   <div id="detail-popover" class="detail-popover"></div>
@@ -158,6 +300,73 @@ def render_speech_review_page(data: dict[str, object]) -> str:
         document.getElementById('detail-popover').classList.remove('visible');
       }}
     }});
+
+    const audioCache = new Map();
+    let currentBtn = null;
+
+    const ICONS = {{
+      play: `<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>`,
+      pause: `<svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>`
+    }};
+
+    function updateBtnState(btn, isPlaying) {{
+      if (!btn) return;
+      const type = btn.getAttribute("data-type");
+      const labelText = type === "original" ? "播放原声" : "播放跟读";
+      btn.querySelector(".label").textContent = isPlaying ? "暂停播放" : labelText;
+      btn.querySelector(".icon").innerHTML = isPlaying ? ICONS.pause : ICONS.play;
+      btn.classList.toggle("playing", isPlaying);
+      if (!isPlaying && !audioCache.get(btn.getAttribute("data-url"))) {{
+         btn.style.setProperty("--progress", "0%");
+      }}
+    }}
+
+    function playAudio(btn, url) {{
+      // 1. Stop identifying the previous button solely by global currentBtn if we want to pause it
+      if (currentBtn && currentBtn !== btn) {{
+        const prevUrl = currentBtn.getAttribute("data-url");
+        const prevAudio = audioCache.get(prevUrl);
+        if (prevAudio) {{
+          prevAudio.pause();
+          updateBtnState(currentBtn, false);
+        }}
+      }}
+
+      // 2. Get or create audio for this URL
+      let audio = audioCache.get(url);
+      if (!audio) {{
+        audio = new Audio(url);
+        audio.ontimeupdate = () => {{
+          if (audio.duration) {{
+            const progress = (audio.currentTime / audio.duration) * 100;
+            btn.style.setProperty("--progress", progress + "%");
+          }}
+        }};
+        audio.onended = () => {{
+          updateBtnState(btn, false);
+          btn.style.setProperty("--progress", "0%");
+          // We can either keep or clear from cache. 
+          // Keeping it allows better memory management if we just reset its time.
+          audio.currentTime = 0; 
+        }};
+        audio.onerror = () => {{
+          alert("无法播放音频");
+          updateBtnState(btn, false);
+          audioCache.delete(url);
+        }};
+        audioCache.set(url, audio);
+      }}
+
+      // 3. Toggle state
+      currentBtn = btn;
+      if (audio.paused) {{
+        audio.play();
+        updateBtnState(btn, true);
+      }} else {{
+        audio.pause();
+        updateBtnState(btn, false);
+      }}
+    }}
   </script>
 </body>
 </html>"""

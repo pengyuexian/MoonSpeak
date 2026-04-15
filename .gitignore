@@ -16,6 +16,7 @@ conda/envs/moonspeak/
 # IDE
 .vscode/
 .idea/
+.superpowers/
 *.swp
 *.swo
 

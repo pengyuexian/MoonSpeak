@@ -17,6 +17,9 @@ import re
 import subprocess
 import sys
 import json
+import math
+import multiprocessing
+import queue
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -73,6 +76,80 @@ MATCH_STOPWORDS = LOW_VALUE_WORDS | {
 }
 
 
+def _timeout_worker(result_queue: multiprocessing.Queue, func, args: tuple) -> None:
+    try:
+        result_queue.put(("result", func(*args)))
+    except Exception as exc:  # pragma: no cover
+        result_queue.put(("error", repr(exc)))
+
+
+def _run_with_timeout(func, args: tuple, timeout_sec: float):
+    ctx = multiprocessing.get_context("spawn")
+    result_queue = ctx.Queue()
+    process = ctx.Process(target=_timeout_worker, args=(result_queue, func, args))
+    process.start()
+    process.join(timeout_sec)
+
+    if process.is_alive():
+        process.terminate()
+        process.join()
+        raise TimeoutError(f"Operation timed out after {int(timeout_sec)}s")
+
+    try:
+        status, payload = result_queue.get_nowait()
+    except queue.Empty as exc:  # pragma: no cover
+        raise RuntimeError("Timed operation exited without returning a result") from exc
+
+    if status == "error":
+        raise RuntimeError(payload)
+    return payload
+
+
+def _normalize_match_text(text: str) -> str:
+    return text.replace("’", "'").lower()
+
+
+def _tokenize_match_words(text: str) -> list[str]:
+    normalized = _normalize_match_text(text)
+    words = re.findall(r"[a-z']+", normalized)
+    cleaned: list[str] = []
+    for word in words:
+        if not word or word in MATCH_STOPWORDS:
+            continue
+        cleaned.append(word)
+        if word.endswith("'s") and len(word) > 2:
+            base = word[:-2]
+            if base and base not in MATCH_STOPWORDS:
+                cleaned.append(base)
+    return cleaned
+
+
+def _build_ngrams(tokens: list[str], size: int) -> set[tuple[str, ...]]:
+    if len(tokens) < size:
+        return set()
+    return {tuple(tokens[index:index + size]) for index in range(len(tokens) - size + 1)}
+
+
+def _ensure_track_match_features(track: dict) -> dict:
+    tokens = track.get("match_tokens")
+    if not isinstance(tokens, list):
+        tokens = _tokenize_match_words(str(track.get("text", "")))
+        track["match_tokens"] = tokens
+    track_words = track.get("match_words")
+    if not isinstance(track_words, set):
+        track_words = set(tokens)
+        track["match_words"] = track_words
+    bigrams = track.get("match_bigrams")
+    if not isinstance(bigrams, set):
+        bigrams = _build_ngrams(tokens, 2)
+        track["match_bigrams"] = bigrams
+    trigrams = track.get("match_trigrams")
+    if not isinstance(trigrams, set):
+        trigrams = _build_ngrams(tokens, 3)
+        track["match_trigrams"] = trigrams
+    return track
+
+
 def normalize_book_path(current_book: str | None, books_root: Path = BOOKS_ROOT) -> Path:
     current_book = (current_book or os.environ.get("CURRENT_BOOK") or DEFAULT_CURRENT_BOOK).strip().strip("/")
     book_path = books_root / current_book
@@ -81,6 +158,12 @@ def normalize_book_path(current_book: str | None, books_root: Path = BOOKS_ROOT)
 
 def get_audioscripts_dir(current_book: str | None = None) -> Path:
     return normalize_book_path(current_book) / "Audioscripts"
+
+
+def get_current_level(current_book: str | None = None) -> str:
+    normalized = (current_book or os.environ.get("CURRENT_BOOK") or DEFAULT_CURRENT_BOOK).strip().strip("/")
+    parts = [part for part in normalized.split("/") if part]
+    return parts[-1] if parts else "unknown"
 
 
 def convert_to_wav(audio_path: str) -> str:
@@ -557,6 +640,7 @@ def _normalize_for_match(text: str) -> str:
 def render_feedback_report_en(
     *,
     base_name: str,
+    matched_level: str,
     matched_unit: int | None,
     matched_tracks: list[str],
     standard_text: str,
@@ -565,6 +649,9 @@ def render_feedback_report_en(
     feedback_en: str,
 ) -> str:
     return f"""# Assessment Report: {base_name}
+
+## Matched Level
+{matched_level}
 
 ## Matched Unit
 {matched_unit if matched_unit is not None else "unknown"}
@@ -592,6 +679,7 @@ Completeness: {scores.get('completeness', 'N/A')}/100
 def render_feedback_report_cn(
     *,
     base_name: str,
+    matched_level: str,
     matched_unit: int | None,
     matched_tracks: list[str],
     standard_text: str,
@@ -600,6 +688,9 @@ def render_feedback_report_cn(
     feedback_cn: str,
 ) -> str:
     return f"""# 评测报告：{base_name}
+
+## 匹配 Level
+{matched_level}
 
 ## 匹配 Unit
 {matched_unit if matched_unit is not None else "unknown"}
@@ -656,31 +747,56 @@ def load_audioscripts(scripts_dir: str | None = None) -> dict[str, dict]:
                 "track_header": track_header,
                 "text": text,
                 "words": set(re.findall(r"[a-z']+", text.lower())),
+                "match_tokens": _tokenize_match_words(text),
             }
+            tracks[track_num]["match_words"] = set(tracks[track_num]["match_tokens"])
+            tracks[track_num]["match_bigrams"] = _build_ngrams(tracks[track_num]["match_tokens"], 2)
+            tracks[track_num]["match_trigrams"] = _build_ngrams(tracks[track_num]["match_tokens"], 3)
     return tracks
 
 
 def find_best_match(whisper_text: str, tracks: dict[str, dict], top_n: int = 5) -> list[dict]:
-    """Find the best matching tracks using word-level similarity."""
-    whisper_words = set(re.findall(r"[a-z']+", whisper_text.lower()))
-    stopwords = {
-        "the", "a", "an", "is", "are", "am", "to", "in", "on", "at", "and", "or",
-        "it", "this", "that", "i", "you", "he", "she", "we", "they", "my", "your",
-        "his", "her", "what", "how", "where", "who", "name", "s", "re", "ve", "not", "don",
-    }
-    whisper_words -= stopwords
+    """Find the best matching tracks using weighted lexical similarity plus phrase overlap."""
+    whisper_tokens = _tokenize_match_words(whisper_text)
+    whisper_words = set(whisper_tokens)
     if not whisper_words:
         return []
 
-    matches: list[dict] = []
+    track_items: list[tuple[str, dict]] = []
+    document_frequency: dict[str, int] = {}
     for track_num, data in tracks.items():
-        track_words = data["words"] - stopwords
+        prepared = _ensure_track_match_features(data)
+        track_items.append((track_num, prepared))
+        for word in prepared["match_words"]:
+            document_frequency[word] = document_frequency.get(word, 0) + 1
+
+    total_tracks = len(track_items)
+    if total_tracks == 0:
+        return []
+
+    whisper_bigrams = _build_ngrams(whisper_tokens, 2)
+    whisper_trigrams = _build_ngrams(whisper_tokens, 3)
+    matches: list[dict] = []
+    for track_num, data in track_items:
+        track_words = data["match_words"]
         if not track_words:
             continue
 
-        intersection = len(whisper_words & track_words)
-        union = len(whisper_words | track_words)
-        score = intersection / union if union else 0
+        weighted_overlap = 0.0
+        weighted_total = 0.0
+        for word in whisper_words:
+            idf = math.log(1 + (total_tracks + 1) / (document_frequency.get(word, 0) + 1))
+            weighted_total += idf
+            if word in track_words:
+                weighted_overlap += idf
+        lexical_score = weighted_overlap / weighted_total if weighted_total else 0.0
+
+        bigram_overlap = len(whisper_bigrams & data["match_bigrams"])
+        trigram_overlap = len(whisper_trigrams & data["match_trigrams"])
+        bigram_score = bigram_overlap / len(whisper_bigrams) if whisper_bigrams else 0.0
+        trigram_score = trigram_overlap / len(whisper_trigrams) if whisper_trigrams else 0.0
+        coverage_score = len(whisper_words & track_words) / len(whisper_words)
+        score = (lexical_score * 0.6) + (coverage_score * 0.15) + (bigram_score * 0.15) + (trigram_score * 0.10)
         if score <= 0.05:
             continue
 
@@ -867,7 +983,7 @@ Extra validation rules:
     return prepared_reference
 
 
-def azure_score(wav_path: str, reference_text: str) -> dict:
+def _azure_score_impl(wav_path: str, reference_text: str) -> dict:
     """Score pronunciation using Azure Speech SDK."""
     import azure.cognitiveservices.speech as speechsdk
 
@@ -928,6 +1044,20 @@ def azure_score(wav_path: str, reference_text: str) -> dict:
         },
         "words": words,
     }
+
+
+def azure_score(wav_path: str, reference_text: str) -> dict:
+    timeout_sec = float(os.environ.get("AZURE_SCORE_TIMEOUT_SEC", "120") or 120)
+    try:
+        return _run_with_timeout(_azure_score_impl, (wav_path, reference_text), timeout_sec=timeout_sec)
+    except TimeoutError:
+        return {
+            "error": f"Azure pronunciation scoring timed out after {int(timeout_sec)}s",
+            "recognized_text": "",
+            "reference_text": reference_text,
+            "scores": {},
+            "words": [],
+        }
 
 
 def llm_generate_feedback_en(scores: dict, recognized_text: str, reference_text: str) -> str:
@@ -1057,6 +1187,7 @@ def assess_audio(audio_path: str, output_dir: str | None = None, scripts_dir: st
     base_name = os.path.splitext(os.path.basename(audio_path))[0]
     output_dir = output_dir or os.path.dirname(audio_path) or "."
     scripts_dir = scripts_dir or str(get_audioscripts_dir())
+    matched_level = get_current_level()
 
     print(f"\n📝 Processing: {base_name}")
 
@@ -1150,6 +1281,7 @@ def assess_audio(audio_path: str, output_dir: str | None = None, scripts_dir: st
 
     result_md = render_feedback_report_en(
         base_name=base_name,
+        matched_level=matched_level,
         matched_unit=matched_unit,
         matched_tracks=matched_tracks,
         standard_text=standard_text,
@@ -1165,6 +1297,7 @@ def assess_audio(audio_path: str, output_dir: str | None = None, scripts_dir: st
 
     result_cn_md = render_feedback_report_cn(
         base_name=base_name,
+        matched_level=matched_level,
         matched_unit=matched_unit,
         matched_tracks=matched_tracks,
         standard_text=standard_text,

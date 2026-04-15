@@ -1,16 +1,18 @@
 import json
+import stat
 import tempfile
 import unittest
 from pathlib import Path
 
 from server.data_loader import (
+    align_standard_text_with_azure,
     build_evaluation_paths,
     build_word_detail_cn,
-    align_standard_text_with_azure,
     classify_word_color,
-    parse_feedback_cn_markdown,
     load_speech_review_page_data,
+    parse_feedback_cn_markdown,
 )
+from server.http_server import parse_speech_path
 from server.render import render_not_found_page, render_speech_review_page
 
 
@@ -240,9 +242,52 @@ class SpeechServerRenderTests(unittest.TestCase):
         self.assertIn("word-chip red", html)
         self.assertIn("你这次一直坚持读完了。", html)
         self.assertIn("viewport", html)
+        self.assertIn("发音", html)
+        self.assertIn("准确度", html)
+        self.assertIn("流利度", html)
+        self.assertIn("完整度", html)
+        self.assertIn("score-card score-card-pronunciation", html)
+        self.assertIn("score-card score-card-accuracy", html)
+        self.assertIn("score-card score-card-fluency", html)
+        self.assertIn("score-card score-card-completeness", html)
+        self.assertIn("score-card-label", html)
+        self.assertIn("score-card-value", html)
+        self.assertIn("<h2>反馈</h2>", html)
+        self.assertNotIn("<h2>中文反馈</h2>", html)
+        self.assertNotIn("<p>发音：71.6/100</p>", html)
+        self.assertNotIn("绿色：比较稳定", html)
+        self.assertNotIn("黄色：还可以更清楚", html)
+        self.assertNotIn("红色：这次要重点练习", html)
 
     def test_render_not_found_page_contains_message(self) -> None:
         html = render_not_found_page("Read_PB58", ["Read_PB58.standard.txt"])
         self.assertIn("Read_PB58", html)
         self.assertIn("Read_PB58.standard.txt", html)
         self.assertIn("未找到", html)
+
+
+class SpeechServerRouteTests(unittest.TestCase):
+    def test_parse_speech_path_extracts_date_and_name(self) -> None:
+        self.assertEqual(
+            ("2026-04-14", "Read_PB58"),
+            parse_speech_path("/speech/2026-04-14/Read_PB58"),
+        )
+
+    def test_parse_speech_path_rejects_invalid_routes(self) -> None:
+        self.assertIsNone(parse_speech_path("/"))
+        self.assertIsNone(parse_speech_path("/speech/2026-04-14"))
+
+
+class SpeechServerStartScriptTests(unittest.TestCase):
+    def test_start_script_uses_moonspeak_conda_environment(self) -> None:
+        script_path = Path(__file__).resolve().parents[1] / "server" / "start.sh"
+
+        self.assertTrue(script_path.exists())
+
+        content = script_path.read_text(encoding="utf-8")
+        self.assertIn("conda run --no-capture-output -n moonspeak", content)
+        self.assertIn("PYTHONPATH=.:src", content)
+        self.assertIn("python -m server.http_server", content)
+
+        mode = script_path.stat().st_mode
+        self.assertTrue(mode & stat.S_IXUSR)
