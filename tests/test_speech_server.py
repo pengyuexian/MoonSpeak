@@ -96,3 +96,22 @@ class SpeechServerAlignmentTests(unittest.TestCase):
         self.assertEqual("red", lines[2]["tokens"][0]["color"])
         self.assertEqual("yellow", lines[2]["tokens"][4]["color"])
         self.assertEqual("red", lines[2]["tokens"][12]["color"])
+
+    def test_align_standard_text_with_curly_apostrophe_keeps_word_together(self) -> None:
+        standard_text = "Jim’s picture"
+        azure_words = [
+            {"word": "Jim's", "error_type": "Mispronunciation", "score": 46.0},
+            {"word": "picture", "error_type": "None", "score": 91.0},
+        ]
+
+        lines = align_standard_text_with_azure(standard_text, azure_words)
+
+        self.assertEqual(1, len(lines))
+        self.assertEqual("Jim’s picture", lines[0]["text"])
+        self.assertEqual(3, len(lines[0]["tokens"]))
+        self.assertEqual("Jim’s", lines[0]["tokens"][0]["text"])
+        self.assertEqual("word", lines[0]["tokens"][0]["kind"])
+        self.assertEqual("picture", lines[0]["tokens"][2]["text"])
+        self.assertEqual("word", lines[0]["tokens"][2]["kind"])
+        self.assertEqual("yellow", lines[0]["tokens"][0]["color"])
+        self.assertEqual("green", lines[0]["tokens"][2]["color"])
