@@ -11,6 +11,7 @@ from server.data_loader import (
     parse_feedback_cn_markdown,
     load_speech_review_page_data,
 )
+from server.render import render_not_found_page, render_speech_review_page
 
 
 class SpeechServerDataTests(unittest.TestCase):
@@ -193,3 +194,55 @@ class SpeechServerLoaderTests(unittest.TestCase):
             "",
             data["standard_lines"][2]["tokens"][0]["detail_text_cn"],
         )
+
+
+class SpeechServerRenderTests(unittest.TestCase):
+    def test_render_speech_review_page_contains_sections(self) -> None:
+        html = render_speech_review_page(
+            {
+                "name": "Read_PB58",
+                "date": "2026-04-14",
+                "matched_unit": "5",
+                "matched_tracks": ["5.05"],
+                "scores": {
+                    "pronunciation": 71.6,
+                    "accuracy": 70.0,
+                    "fluency": 77.0,
+                    "completeness": 71.0,
+                },
+                "score_lines_cn": ["发音：71.6/100"],
+                "problem_word_lines_cn": ["Is：这个英文单词漏读了（分数：0）"],
+                "feedback_lines_cn": ["你这次一直坚持读完了。"],
+                "standard_lines": [
+                    {
+                        "text": "Is that Jim's picture of the wildlife park?",
+                        "tokens": [
+                            {
+                                "text": "Is",
+                                "kind": "word",
+                                "color": "red",
+                                "detail_text_cn": "这个词这次漏读了。当前分数：0",
+                            },
+                            {"text": " ", "kind": "space"},
+                            {
+                                "text": "that",
+                                "kind": "word",
+                                "color": "neutral",
+                                "detail_text_cn": "",
+                            },
+                        ],
+                    }
+                ],
+            }
+        )
+        self.assertIn("speech-page", html)
+        self.assertIn("Read_PB58", html)
+        self.assertIn("word-chip red", html)
+        self.assertIn("你这次一直坚持读完了。", html)
+        self.assertIn("viewport", html)
+
+    def test_render_not_found_page_contains_message(self) -> None:
+        html = render_not_found_page("Read_PB58", ["Read_PB58.standard.txt"])
+        self.assertIn("Read_PB58", html)
+        self.assertIn("Read_PB58.standard.txt", html)
+        self.assertIn("未找到", html)
