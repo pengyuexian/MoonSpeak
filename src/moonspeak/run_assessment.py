@@ -50,7 +50,7 @@ def build_run_result(
     staged_audio_path: Path,
     pipeline_result: dict,
 ) -> dict[str, object]:
-    report_name = str(pipeline_result.get("files", {}).get("results_cn", ""))
+    report_name = str(pipeline_result.get("files", {}).get("results", ""))
     report_path = staged_audio_path.with_name(report_name)
     base_name = staged_audio_path.stem
     return {

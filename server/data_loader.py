@@ -12,8 +12,7 @@ def build_evaluation_paths(
     return {
         "standard": base_dir / f"{name}.standard.txt",
         "azure": base_dir / f"{name}.azure.json",
-        "feedback_cn": base_dir / f"{name}.feedback.cn.md",
-        "feedback_en": base_dir / f"{name}.feedback.md",
+        "feedback": base_dir / f"{name}.feedback.md",
     }
 
 
@@ -43,6 +42,26 @@ def parse_feedback_cn_markdown(markdown: str) -> dict[str, object]:
         "problem_word_lines": problem_word_lines,
         "feedback_lines": sections.get("反馈", []),
     }
+
+
+def _load_feedback_report(paths: dict[str, Path]) -> dict[str, object]:
+    feedback_path = paths["feedback"]
+    legacy_feedback_path = feedback_path.with_suffix(".cn.md")
+    if feedback_path.exists():
+        feedback_cn = parse_feedback_cn_markdown(feedback_path.read_text(encoding="utf-8"))
+    elif legacy_feedback_path.exists():
+        feedback_cn = parse_feedback_cn_markdown(legacy_feedback_path.read_text(encoding="utf-8"))
+        return feedback_cn
+    else:
+        raise FileNotFoundError(f"Feedback report not found: {feedback_path}")
+    if (
+        legacy_feedback_path.exists()
+        and not feedback_cn["matched_unit"]
+        and not feedback_cn["matched_tracks"]
+        and not feedback_cn["feedback_lines"]
+    ):
+        feedback_cn = parse_feedback_cn_markdown(legacy_feedback_path.read_text(encoding="utf-8"))
+    return feedback_cn
 
 
 def classify_word_color(word_result: dict) -> str:
@@ -156,7 +175,7 @@ def load_speech_review_page_data(
     paths = build_evaluation_paths(evaluations_root, date, name)
     standard_text = paths["standard"].read_text(encoding="utf-8")
     azure_data = json.loads(paths["azure"].read_text(encoding="utf-8"))
-    feedback_cn = parse_feedback_cn_markdown(paths["feedback_cn"].read_text(encoding="utf-8"))
+    feedback_cn = _load_feedback_report(paths)
     track_sections = parse_standard_sections(standard_text, azure_data.get("words", []))
     for section in track_sections:
         for line in section["lines"]:
@@ -168,17 +187,26 @@ def load_speech_review_page_data(
 
     # Audio paths
     repo_root = evaluations_root.parent
-    
+
     # 1. Detect Book Level
     book_level = None
-    # Priority A: Parse from feedback.md (EN)
-    if paths["feedback_en"].exists():
-        en_md = paths["feedback_en"].read_text(encoding="utf-8")
-        level_match = re.search(r"## Matched Level\n+(\d+)", en_md)
+    # Priority A: Detect from the feedback report, preserving the existing fallback.
+    feedback_report_path = paths["feedback"]
+    if feedback_report_path.exists():
+        feedback_md = feedback_report_path.read_text(encoding="utf-8")
+        level_match = re.search(r"##\s+匹配\s+Level\n+(\d+)", feedback_md)
+        if not level_match and feedback_report_path.with_suffix(".cn.md").exists():
+            feedback_md = feedback_report_path.with_suffix(".cn.md").read_text(encoding="utf-8")
+            level_match = re.search(r"##\s+匹配\s+Level\n+(\d+)", feedback_md)
+        if level_match:
+            book_level = level_match.group(1)
+    elif feedback_report_path.with_suffix(".cn.md").exists():
+        feedback_md = feedback_report_path.with_suffix(".cn.md").read_text(encoding="utf-8")
+        level_match = re.search(r"##\s+匹配\s+Level\n+(\d+)", feedback_md)
         if level_match:
             book_level = level_match.group(1)
 
-    # Priority B: Detect based on standard text content (fallback)
+    # Priority B: Detect based on standard text content.
     if not book_level and standard_text:
         # Extract a reasonably unique snippet (exclude common intro lines)
         lines = [line.strip() for line in standard_text.splitlines() if line.strip()]

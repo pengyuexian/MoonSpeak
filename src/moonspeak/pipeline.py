@@ -588,7 +588,6 @@ def build_output_paths(output_dir: str, base_name: str) -> dict[str, str]:
         "reference": os.path.join(output_dir, f"{base_name}.standard.txt"),
         "azure": os.path.join(output_dir, f"{base_name}.azure.json"),
         "results": os.path.join(output_dir, f"{base_name}.feedback.md"),
-        "results_cn": os.path.join(output_dir, f"{base_name}.feedback.cn.md"),
     }
 
 
@@ -1792,24 +1791,9 @@ def assess_audio(audio_path: str, output_dir: str | None = None, scripts_dir: st
     feedback_input["words"] = scores.get("words", [])
     problem_words = extract_problem_words(scores)
     feedback_en = build_feedback_fallback_en(problem_words, scores.get("scores", {}))
-
-    result_md = render_feedback_report_en(
-        base_name=base_name,
-        matched_level=matched_level,
-        matched_unit=matched_unit,
-        matched_tracks=matched_tracks,
-        standard_text=standard_text,
-        scores=scores.get("scores", {}),
-        problem_words=problem_words,
-        feedback_en=feedback_en,
-    )
-    with open(output_paths["results"], "w", encoding="utf-8") as file:
-        file.write(result_md)
-
-    print("  🌏 Translating to Chinese...")
     feedback_cn = build_feedback_fallback_cn(problem_words, scores.get("scores", {}))
 
-    result_cn_md = render_feedback_report_cn(
+    result_md = render_feedback_report_cn(
         base_name=base_name,
         matched_level=matched_level,
         matched_unit=matched_unit,
@@ -1819,8 +1803,8 @@ def assess_audio(audio_path: str, output_dir: str | None = None, scripts_dir: st
         problem_words=problem_words,
         feedback_cn=feedback_cn,
     )
-    with open(output_paths["results_cn"], "w", encoding="utf-8") as file:
-        file.write(result_cn_md)
+    with open(output_paths["results"], "w", encoding="utf-8") as file:
+        file.write(result_md)
 
     return {
         "audio": os.path.basename(audio_path),
@@ -1835,7 +1819,6 @@ def assess_audio(audio_path: str, output_dir: str | None = None, scripts_dir: st
         "files": {
             "reference": os.path.basename(output_paths["reference"]),
             "results": os.path.basename(output_paths["results"]),
-            "results_cn": os.path.basename(output_paths["results_cn"]),
         },
     }
 

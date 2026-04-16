@@ -30,13 +30,11 @@ class SpeechServerDataTests(unittest.TestCase):
             paths["azure"],
         )
         self.assertEqual(
-            base / "2026-04-14" / "Read_PB58.feedback.cn.md",
-            paths["feedback_cn"],
-        )
-        self.assertEqual(
             base / "2026-04-14" / "Read_PB58.feedback.md",
-            paths["feedback_en"],
+            paths["feedback"],
         )
+        self.assertNotIn("feedback_cn", paths)
+        self.assertNotIn("feedback_en", paths)
 
     def test_parse_feedback_cn_markdown_extracts_summary_sections(self) -> None:
         markdown = (
@@ -186,7 +184,7 @@ class SpeechServerLoaderTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            (base / "Read_PB58.feedback.cn.md").write_text(
+            (base / "Read_PB58.feedback.md").write_text(
                 "# 评测报告：Read_PB58\n\n"
                 "## 匹配 Unit\n5\n\n"
                 "## 匹配 Track\n5.05\n\n"
@@ -194,7 +192,6 @@ class SpeechServerLoaderTests(unittest.TestCase):
                 "## 反馈\n你这次一直坚持读完了。\n",
                 encoding="utf-8",
             )
-            (base / "Read_PB58.feedback.md").write_text("# noop\n", encoding="utf-8")
 
             data = load_speech_review_page_data(Path(tmp_dir) / "evaluations", "2026-04-14", "Read_PB58")
 
@@ -215,6 +212,135 @@ class SpeechServerLoaderTests(unittest.TestCase):
             "",
             data["track_sections"][0]["lines"][2]["tokens"][0]["detail_text_cn"],
         )
+
+    def test_load_speech_review_page_data_uses_feedback_file_for_book_level(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            evaluations_dir = root / "evaluations" / "2026-04-14"
+            evaluations_dir.mkdir(parents=True)
+            (evaluations_dir / "Read_PB58.standard.txt").write_text(
+                "## 5.05\nThe Friendly Farm.\n",
+                encoding="utf-8",
+            )
+            (evaluations_dir / "Read_PB58.azure.json").write_text(
+                json.dumps(
+                    {
+                        "reference_text": "The Friendly Farm.\n",
+                        "recognized_text": "The Friendly Farm.",
+                        "scores": {},
+                        "words": [{"word": "The", "error_type": "None", "score": 94.0}],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (evaluations_dir / "Read_PB58.feedback.md").write_text(
+                "# 评测报告：Read_PB58\n\n"
+                "## 匹配 Level\n5\n\n"
+                "## 匹配 Track\n5.05\n\n"
+                "## 反馈\n继续保持。\n",
+                encoding="utf-8",
+            )
+            books_dir = root / "books" / "Power_Up" / "5" / "Tracks"
+            books_dir.mkdir(parents=True)
+            (books_dir / "5.05.mp3").write_bytes(b"track")
+
+            data = load_speech_review_page_data(root / "evaluations", "2026-04-14", "Read_PB58")
+
+        self.assertEqual("/audio/track/5/5.05.mp3", data["track_sections"][0]["audio_url_track"])
+
+    def test_load_speech_review_page_data_falls_back_to_legacy_chinese_feedback_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            evaluations_dir = root / "evaluations" / "2026-04-14"
+            evaluations_dir.mkdir(parents=True)
+            (evaluations_dir / "Read_PB58.standard.txt").write_text(
+                "## 5.05\nThe Friendly Farm.\n",
+                encoding="utf-8",
+            )
+            (evaluations_dir / "Read_PB58.azure.json").write_text(
+                json.dumps(
+                    {
+                        "reference_text": "The Friendly Farm.\n",
+                        "recognized_text": "The Friendly Farm.",
+                        "scores": {},
+                        "words": [{"word": "The", "error_type": "None", "score": 94.0}],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (evaluations_dir / "Read_PB58.feedback.md").write_text(
+                "# Report\n\n"
+                "## Matched Level\n9\n\n"
+                "## Matched Unit\n9\n\n"
+                "## Feedback\nLegacy English report.\n",
+                encoding="utf-8",
+            )
+            (evaluations_dir / "Read_PB58.feedback.cn.md").write_text(
+                "# 评测报告：Read_PB58\n\n"
+                "## 匹配 Level\n5\n\n"
+                "## 匹配 Unit\n5\n\n"
+                "## 匹配 Track\n5.05\n\n"
+                "## 评分\n发音：71.6/100\n\n"
+                "## 重点问题词\n- The：这个英文单词漏读了（分数：0）\n\n"
+                "## 反馈\n继续保持。\n",
+                encoding="utf-8",
+            )
+            books_dir = root / "books" / "Power_Up" / "5" / "Tracks"
+            books_dir.mkdir(parents=True)
+            (books_dir / "5.05.mp3").write_bytes(b"track")
+
+            data = load_speech_review_page_data(root / "evaluations", "2026-04-14", "Read_PB58")
+
+        self.assertEqual("5", data["matched_unit"])
+        self.assertEqual(["5.05"], data["matched_tracks"])
+        self.assertEqual(["发音：71.6/100"], data["score_lines_cn"])
+        self.assertEqual(["继续保持。"], data["feedback_lines_cn"])
+        self.assertEqual("/audio/track/5/5.05.mp3", data["track_sections"][0]["audio_url_track"])
+
+    def test_load_speech_review_page_data_uses_legacy_chinese_feedback_file_when_unified_file_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            evaluations_dir = root / "evaluations" / "2026-04-14"
+            evaluations_dir.mkdir(parents=True)
+            (evaluations_dir / "Read_PB58.standard.txt").write_text(
+                "## 5.05\nThe Friendly Farm.\n",
+                encoding="utf-8",
+            )
+            (evaluations_dir / "Read_PB58.azure.json").write_text(
+                json.dumps(
+                    {
+                        "reference_text": "The Friendly Farm.\n",
+                        "recognized_text": "The Friendly Farm.",
+                        "scores": {},
+                        "words": [{"word": "The", "error_type": "None", "score": 94.0}],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (evaluations_dir / "Read_PB58.feedback.cn.md").write_text(
+                "# 评测报告：Read_PB58\n\n"
+                "## 匹配 Level\n5\n\n"
+                "## 匹配 Unit\n5\n\n"
+                "## 匹配 Track\n5.05\n\n"
+                "## 评分\n发音：71.6/100\n\n"
+                "## 重点问题词\n- The：这个英文单词漏读了（分数：0）\n\n"
+                "## 反馈\n继续保持。\n",
+                encoding="utf-8",
+            )
+            books_dir = root / "books" / "Power_Up" / "5" / "Tracks"
+            books_dir.mkdir(parents=True)
+            (books_dir / "5.05.mp3").write_bytes(b"track")
+
+            data = load_speech_review_page_data(root / "evaluations", "2026-04-14", "Read_PB58")
+
+        self.assertEqual("5", data["matched_unit"])
+        self.assertEqual(["5.05"], data["matched_tracks"])
+        self.assertEqual(["发音：71.6/100"], data["score_lines_cn"])
+        self.assertEqual(["继续保持。"], data["feedback_lines_cn"])
+        self.assertEqual("/audio/track/5/5.05.mp3", data["track_sections"][0]["audio_url_track"])
 
 
 class SpeechServerRenderTests(unittest.TestCase):
