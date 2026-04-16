@@ -200,7 +200,8 @@ class SpeechServerLoaderTests(unittest.TestCase):
         self.assertEqual("5", data["matched_unit"])
         self.assertEqual(["5.05"], data["matched_tracks"])
         self.assertEqual(["发音：71.6/100"], data["score_lines_cn"])
-        self.assertEqual(["你这次一直坚持读完了。"], data["feedback_lines_cn"])
+        self.assertEqual(["你这次一直坚持读完了。"], data["feedback_lines"])
+        self.assertNotIn("feedback_lines_cn", data)
         self.assertEqual(1, len(data["track_sections"]))
         self.assertEqual("5.05", data["track_sections"][0]["track_num"])
         self.assertEqual(3, len(data["track_sections"][0]["lines"]))
@@ -296,7 +297,8 @@ class SpeechServerLoaderTests(unittest.TestCase):
         self.assertEqual("5", data["matched_unit"])
         self.assertEqual(["5.05"], data["matched_tracks"])
         self.assertEqual(["发音：71.6/100"], data["score_lines_cn"])
-        self.assertEqual(["继续保持。"], data["feedback_lines_cn"])
+        self.assertEqual(["继续保持。"], data["feedback_lines"])
+        self.assertNotIn("feedback_lines_cn", data)
         self.assertEqual("/audio/track/5/5.05.mp3", data["track_sections"][0]["audio_url_track"])
 
     def test_load_speech_review_page_data_uses_legacy_chinese_feedback_file_when_unified_file_is_missing(self) -> None:
@@ -339,7 +341,8 @@ class SpeechServerLoaderTests(unittest.TestCase):
         self.assertEqual("5", data["matched_unit"])
         self.assertEqual(["5.05"], data["matched_tracks"])
         self.assertEqual(["发音：71.6/100"], data["score_lines_cn"])
-        self.assertEqual(["继续保持。"], data["feedback_lines_cn"])
+        self.assertEqual(["继续保持。"], data["feedback_lines"])
+        self.assertNotIn("feedback_lines_cn", data)
         self.assertEqual("/audio/track/5/5.05.mp3", data["track_sections"][0]["audio_url_track"])
 
 
@@ -359,7 +362,7 @@ class SpeechServerRenderTests(unittest.TestCase):
                 },
                 "score_lines_cn": ["发音：71.6/100"],
                 "problem_word_lines_cn": ["Is：这个英文单词漏读了（分数：0）"],
-                "feedback_lines_cn": ["你这次一直坚持读完了。"],
+                "feedback_lines": ["你这次一直坚持读完了。"],
                 "track_sections": [
                     {
                         "track_num": "5.05",
@@ -411,6 +414,11 @@ class SpeechServerRenderTests(unittest.TestCase):
         self.assertIn("播放跟读", html)
         self.assertNotIn("min-height: 40px", html)
         self.assertIn("<h2>反馈</h2>", html)
+        self.assertIn(
+            "AI 生成的反馈可能不完全准确，请结合录音和实际朗读情况一起判断。",
+            html,
+        )
+        self.assertIn("feedback-disclaimer", html)
         self.assertNotIn("<h2>中文反馈</h2>", html)
         self.assertNotIn("<p>发音：71.6/100</p>", html)
         self.assertNotIn("绿色：比较稳定", html)

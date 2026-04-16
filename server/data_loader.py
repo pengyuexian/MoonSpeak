@@ -250,7 +250,7 @@ def load_speech_review_page_data(
         "scores": azure_data.get("scores", {}),
         "score_lines_cn": feedback_cn["score_lines"],
         "problem_word_lines_cn": feedback_cn["problem_word_lines"],
-        "feedback_lines_cn": feedback_cn["feedback_lines"],
+        "feedback_lines": feedback_cn["feedback_lines"],
         "track_sections": track_sections,
         "audio_url_user": recording_url,
     }

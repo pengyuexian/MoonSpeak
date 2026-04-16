@@ -16,7 +16,12 @@ def render_speech_review_page(data: dict[str, object]) -> str:
         for card_class, label, value in score_specs
     )
 
-    feedback_blocks = "".join(f"<p>{escape(line)}</p>" for line in data["feedback_lines_cn"])
+    feedback_blocks = "".join(f"<p>{escape(line)}</p>" for line in data["feedback_lines"])
+    feedback_disclaimer = (
+        '<p class="feedback-disclaimer">'
+        "AI 生成的反馈可能不完全准确，请结合录音和实际朗读情况一起判断。"
+        "</p>"
+    )
 
     user_url = data.get("audio_url_user")
     user_btn_html = (
@@ -305,6 +310,12 @@ def render_speech_review_page(data: dict[str, object]) -> str:
     .audio-btn.playing {{
       box-shadow: 0 2px 8px rgba(0,0,0,0.05);
     }}
+    .feedback-disclaimer {{
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }}
   </style>
 </head>
 <body>
@@ -324,6 +335,7 @@ def render_speech_review_page(data: dict[str, object]) -> str:
     <section class="card">
       <h2>反馈</h2>
       {feedback_blocks}
+      {feedback_disclaimer}
     </section>
   </main>
   <div id="detail-popover" class="detail-popover"></div>
