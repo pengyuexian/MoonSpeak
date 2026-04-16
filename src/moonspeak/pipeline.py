@@ -18,8 +18,12 @@ import subprocess
 import sys
 import json
 import math
+import difflib
 import multiprocessing
 import queue
+import threading
+import wave
+import contextlib
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -262,6 +266,231 @@ def _is_strong_line_match(line: str, transcript_words: set[str]) -> bool:
     return overlap >= 2 and (overlap / len(line_words)) >= 0.6
 
 
+def get_audio_duration_seconds(wav_path: str) -> float:
+    try:
+        with contextlib.closing(wave.open(wav_path, "rb")) as wav_file:
+            return wav_file.getnframes() / wav_file.getframerate()
+    except Exception:
+        return 0.0
+
+
+def _estimate_minimum_word_count(duration_sec: float) -> int:
+    if duration_sec <= 0:
+        return 0
+    return max(12, int(duration_sec * 0.85))
+
+
+def _count_prepared_reference_words(reference_text: str) -> int:
+    return len(re.findall(r"[A-Za-z']+", prepare_reference_text_for_llm(reference_text)))
+
+
+def _strip_track_markers(standard_text: str) -> str:
+    kept_lines = [
+        line for line in clean_reference_text(standard_text).splitlines()
+        if not re.match(r"^##\s+\d+\.\d+\s*$", line.strip())
+    ]
+    return clean_reference_text("\n".join(kept_lines))
+
+
+def _trim_repeated_intro_phrase(line: str, transcript_text: str) -> str:
+    word_matches = list(re.finditer(r"[A-Za-z']+", line.replace("’", "'")))
+    if len(word_matches) < 4 or len(word_matches) % 2 != 0:
+        return line.strip()
+    half = len(word_matches) // 2
+    first_half = [match.group(0).lower() for match in word_matches[:half]]
+    second_half = [match.group(0).lower() for match in word_matches[half:]]
+    if first_half != second_half:
+        return line.strip()
+    phrase = " ".join(first_half)
+    transcript_normalized = " ".join(re.findall(r"[A-Za-z']+", transcript_text.replace("’", "'").lower()))
+    if transcript_normalized.count(phrase) > 1:
+        return line.strip()
+    end_idx = word_matches[half - 1].end()
+    return line[:end_idx].rstrip(" ,.;:!?…")
+
+
+def _normalize_line_for_evidence(line: str) -> str:
+    stripped = line.strip()
+    stripped = re.sub(r"^\[Frame\s+\d+\]\s*$", "", stripped)
+    stripped = re.sub(r"^\d+\s+", "", stripped)
+    stripped = re.sub(r"^[A-Za-z][A-Za-z ,&']{0,60}:\s+", "", stripped)
+    return stripped.strip()
+
+
+def _line_has_any_evidence(line: str, transcript_words: set[str]) -> bool:
+    line_words = _tokenize_content_words(_normalize_line_for_evidence(line))
+    return bool(line_words and (line_words & transcript_words))
+
+def _line_match_strength(
+    line: str,
+    transcript_words: set[str],
+    transcript_bigrams: set[tuple[str, ...]],
+) -> int:
+    normalized_line = _normalize_line_for_evidence(line)
+    tokens = _tokenize_match_words(normalized_line)
+    if not tokens:
+        return 0
+    token_set = set(tokens)
+    overlap = len(token_set & transcript_words)
+    coverage = overlap / len(token_set)
+    line_bigrams = _build_ngrams(tokens, 2)
+    bigram_overlap = len(line_bigrams & transcript_bigrams)
+    starts_with_matching_bigram = bool(tokens[:2] and tuple(tokens[:2]) in transcript_bigrams)
+
+    if overlap >= 3:
+        return 3
+    if overlap >= 2 and (starts_with_matching_bigram or coverage >= 0.6):
+        return 2
+    if overlap >= 2 and bigram_overlap >= 2:
+        return 2
+    if overlap >= 1 and starts_with_matching_bigram:
+        return 1
+    return 0
+
+
+def _select_track_lines(
+    track_text: str,
+    transcript_text: str,
+    transcript_words: set[str],
+    transcript_bigrams: set[tuple[str, ...]],
+) -> list[str]:
+    candidate_lines = [
+        line for line in clean_reference_text(track_text).splitlines() if _normalize_line_for_evidence(line)
+    ]
+    if not candidate_lines:
+        return []
+
+    strengths = [_line_match_strength(line, transcript_words, transcript_bigrams) for line in candidate_lines]
+    matched_indexes = [idx for idx, strength in enumerate(strengths) if strength >= 2]
+    if not matched_indexes:
+        matched_indexes = [idx for idx, strength in enumerate(strengths) if strength >= 1]
+    if not matched_indexes:
+        return []
+
+    clusters: list[list[int]] = [[matched_indexes[0]]]
+    for idx in matched_indexes[1:]:
+        if idx - clusters[-1][-1] <= 2:
+            clusters[-1].append(idx)
+        else:
+            clusters.append([idx])
+
+    def cluster_key(indexes: list[int]) -> tuple[int, int, int]:
+        total_strength = sum(strengths[idx] for idx in indexes)
+        return (total_strength, len(indexes), indexes[-1])
+
+    best_cluster = max(clusters, key=cluster_key)
+    selected_clusters = [best_cluster]
+    best_strength = sum(strengths[idx] for idx in best_cluster)
+    for cluster in clusters:
+        if cluster is best_cluster:
+            continue
+        cluster_strength = sum(strengths[idx] for idx in cluster)
+        if len(cluster) >= 2 and cluster_strength >= max(8, int(best_strength * 0.5)):
+            selected_clusters.append(cluster)
+
+    selected_indexes: set[int] = set()
+    for cluster in selected_clusters:
+        selected_indexes.update(cluster)
+
+        intro_candidates = [
+            idx
+            for idx in range(cluster[0])
+            if strengths[idx] >= 1 and len(_tokenize_match_words(candidate_lines[idx])) <= 8
+        ]
+        if intro_candidates:
+            selected_indexes.add(intro_candidates[0])
+
+        for current, following in zip(cluster, cluster[1:]):
+            gap = following - current - 1
+            if gap <= 1:
+                for idx in range(current + 1, following):
+                    if strengths[idx] >= 1 or (
+                        gap == 1
+                        and strengths[current] >= 3
+                        and strengths[following] >= 3
+                        and len(_tokenize_match_words(candidate_lines[idx])) <= 8
+                    ):
+                        selected_indexes.add(idx)
+
+        last_idx = cluster[-1]
+        if last_idx + 1 < len(candidate_lines):
+            next_line = candidate_lines[last_idx + 1]
+            next_tokens = _tokenize_match_words(_normalize_line_for_evidence(next_line))
+            if len(next_tokens) <= 3 and _line_matches_transcript_suffix_windows(next_line, transcript_text):
+                selected_indexes.add(last_idx + 1)
+
+    selected_lines: list[str] = []
+    for idx in sorted(selected_indexes):
+        line = candidate_lines[idx]
+        if idx == min(selected_indexes):
+            line = _trim_repeated_intro_phrase(line, transcript_text)
+        selected_lines.append(line)
+    return selected_lines
+
+
+def _line_is_subsumed(normalized_line: str, seen_lines: set[str]) -> bool:
+    if not normalized_line:
+        return True
+    for seen_line in seen_lines:
+        if normalized_line == seen_line:
+            return True
+        if normalized_line in seen_line or seen_line in normalized_line:
+            return True
+    return False
+
+
+def _render_selected_track_lines(selected_lines: list[tuple[str, str]]) -> str:
+    rendered: list[str] = []
+    active_track: str | None = None
+    for track_num, raw_line in selected_lines:
+        cleaned_line = _normalize_line_for_evidence(raw_line)
+        if not cleaned_line:
+            continue
+        if track_num != active_track:
+            rendered.append(f"## {track_num}")
+            active_track = track_num
+        rendered.append(cleaned_line)
+    return clean_reference_text("\n".join(rendered))
+
+
+def _expand_reference_span(track_sections: list[tuple[str, str]], transcript_text: str, minimum_word_count: int) -> str:
+    if not track_sections:
+        return ""
+
+    transcript_tokens = _tokenize_match_words(transcript_text)
+    transcript_words = set(transcript_tokens)
+    transcript_bigrams = _build_ngrams(transcript_tokens, 2)
+    if not transcript_words:
+        flattened = [
+            (track_num, line)
+            for track_num, track_text in track_sections
+            for line in clean_reference_text(track_text).splitlines()
+        ]
+        return _render_selected_track_lines(flattened)
+
+    selected_lines: list[tuple[str, str]] = []
+    seen_normalized_lines: set[str] = set()
+    for track_num, track_text in track_sections:
+        track_lines = _select_track_lines(track_text, transcript_text, transcript_words, transcript_bigrams)
+        deduped_track_lines: list[tuple[str, str]] = []
+        for raw_line in track_lines:
+            normalized_line = _normalize_line_for_compare(_normalize_line_for_evidence(raw_line))
+            if _line_is_subsumed(normalized_line, seen_normalized_lines):
+                continue
+            deduped_track_lines.append((track_num, raw_line))
+            seen_normalized_lines.add(normalized_line)
+        selected_lines.extend(deduped_track_lines)
+
+    if not selected_lines:
+        flattened = [
+            (track_num, line)
+            for track_num, track_text in track_sections
+            for line in clean_reference_text(track_text).splitlines()
+        ]
+        return _render_selected_track_lines(flattened)
+    return _render_selected_track_lines(selected_lines)
+
+
 def narrow_reference_text(reference_text: str, transcript_text: str) -> str:
     reference_text = clean_reference_text(reference_text)
     transcript_words = _tokenize_content_words(transcript_text)
@@ -346,6 +575,14 @@ def should_retry_standard_generation(score_result: dict) -> bool:
     return bool(recognized_text) and completeness < 60 and omission_count >= max(3, mispronunciation_count)
 
 
+def _standard_is_substantially_shorter_than_transcript(standard_text: str, transcript_text: str) -> bool:
+    transcript_word_count = len(re.findall(r"[A-Za-z']+", transcript_text))
+    if transcript_word_count == 0:
+        return False
+    standard_word_count = _count_prepared_reference_words(standard_text)
+    return standard_word_count < int(transcript_word_count * 0.75)
+
+
 def build_output_paths(output_dir: str, base_name: str) -> dict[str, str]:
     return {
         "reference": os.path.join(output_dir, f"{base_name}.standard.txt"),
@@ -361,10 +598,59 @@ def _format_matched_tracks(matched_tracks: list[str]) -> str:
     return "\n".join(matched_tracks)
 
 
-def choose_report_tracks(matches: list[dict]) -> list[str]:
+def _line_matches_transcript_tail(line: str, transcript_tail: str) -> bool:
+    normalized_line = _normalize_line_for_compare(_normalize_line_for_evidence(line))
+    normalized_tail = _normalize_line_for_compare(transcript_tail)
+    if not normalized_line or not normalized_tail:
+        return False
+    line_tokens = normalized_line.split()
+    tail_tokens = set(normalized_tail.split())
+    overlap = sum(1 for token in line_tokens if token in tail_tokens)
+    coverage = overlap / len(line_tokens)
+    if len(line_tokens) <= 2 and overlap >= 1:
+        return True
+    if len(line_tokens) <= 3:
+        ratio = difflib.SequenceMatcher(None, normalized_line, normalized_tail).ratio()
+        if overlap >= 1 and ratio >= 0.45:
+            return True
+    if overlap >= 3 and coverage >= 0.5:
+        return True
+    return difflib.SequenceMatcher(None, normalized_line, normalized_tail).ratio() >= 0.6
+
+
+def _line_matches_transcript_suffix_windows(line: str, transcript_text: str) -> bool:
+    transcript_words = re.findall(r"[A-Za-z']+", transcript_text.replace("’", "'"))
+    normalized_line = _normalize_line_for_compare(line)
+    line_tokens = normalized_line.split()
+    if not transcript_words or not line_tokens:
+        return False
+    for size in sorted({len(line_tokens), len(line_tokens) + 1, len(line_tokens) + 2}):
+        suffix = " ".join(transcript_words[-size:])
+        if _line_matches_transcript_tail(line, suffix):
+            return True
+    return False
+
+
+def _best_track_closes_transcript(best_match: dict, transcript_text: str) -> bool:
+    prepared = prepare_reference_text_for_llm(str(best_match.get("text", "")))
+    lines = [line for line in prepared.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return False
+    transcript_words = re.findall(r"[A-Za-z']+", transcript_text.replace("’", "'"))
+    transcript_tail = " ".join(transcript_words[-20:])
+    if not transcript_tail:
+        return False
+    penultimate_matches = _line_matches_transcript_tail(lines[-2], transcript_tail)
+    final_matches = _line_matches_transcript_tail(lines[-1], transcript_tail)
+    return penultimate_matches and final_matches
+
+
+def choose_report_tracks(matches: list[dict], transcript_text: str = "") -> list[str]:
     if not matches:
         return []
     best = matches[0]
+    if transcript_text.strip() and _best_track_closes_transcript(best, transcript_text):
+        return [best["track_num"]]
     threshold = best["score"] * 0.55
     chosen: list[str] = []
     for match in matches:
@@ -954,33 +1240,239 @@ Output the final standard content only."""
     return system_prompt, user_prompt
 
 
-def generate_standard_content(reference_text: str, whisper_text: str, track_header: str, unit: int) -> str:
+def generate_standard_content(
+    reference_text: str,
+    whisper_text: str,
+    track_header: str,
+    unit: int,
+    *,
+    wav_path: str | None = None,
+    track_sections: list[tuple[str, str]] | None = None,
+) -> str:
     if not whisper_text.strip():
         return reference_text
 
-    narrowed_reference = narrow_reference_text(reference_text, whisper_text)
-    prepared_reference = prepare_reference_text_for_llm(narrowed_reference)
+    minimum_word_count = _estimate_minimum_word_count(get_audio_duration_seconds(wav_path)) if wav_path else 0
+    sections = track_sections or [(track_header.replace("Track ", "").strip(), reference_text)]
+    expanded_reference = _expand_reference_span(sections, whisper_text, minimum_word_count)
+    prepared_reference = clean_reference_text(expanded_reference)
     if not prepared_reference.strip():
         return clean_reference_text(reference_text)
-    system_prompt, user_prompt = build_standard_content_prompt(prepared_reference, whisper_text, track_header, unit)
-    standard_text = clean_reference_text(llm_chat(system_prompt, user_prompt, temperature=0.1, max_tokens=4000))
-    if standard_matches_canonical_lines(standard_text, prepared_reference):
-        return standard_text
-
-    retry_prompt = f"""{user_prompt}
-
-Extra validation rules:
-- Every output line must be copied from the canonical book text exactly.
-- You may output a full canonical line, or for the final line only, an exact starting prefix of a canonical line.
-- Do not drop the first word of any kept line.
-- Do not paraphrase, simplify, or rewrite any line.
-"""
-    retry_text = clean_reference_text(llm_chat(system_prompt, retry_prompt, temperature=0.0, max_tokens=4000))
-    if standard_matches_canonical_lines(retry_text, prepared_reference):
-        return retry_text
-    if standard_matches_canonical_lines(standard_text, prepared_reference):
-        return standard_text
     return prepared_reference
+
+
+def _normalize_alignment_word(word: str) -> str:
+    return word.replace("’", "'").lower()
+
+
+def _reference_words(reference_text: str) -> list[str]:
+    return re.findall(r"[A-Za-z']+", reference_text.replace("’", "'"))
+
+
+def _mark_mispronunciations(words: list[dict]) -> list[dict]:
+    marked: list[dict] = []
+    for word in words:
+        updated = dict(word)
+        if updated.get("error_type") in (None, "", "None") and float(updated.get("score", 0) or 0) < 60:
+            updated["error_type"] = "Mispronunciation"
+        marked.append(updated)
+    return marked
+
+
+def _align_assessment_words(reference_text: str, recognized_words: list[dict]) -> list[dict]:
+    reference_words = _reference_words(reference_text)
+    normalized_reference = [_normalize_alignment_word(word) for word in reference_words]
+    normalized_recognized = [_normalize_alignment_word(str(word.get("word", ""))) for word in recognized_words]
+    ref_len = len(reference_words)
+    rec_len = len(recognized_words)
+
+    dp = [[0] * (rec_len + 1) for _ in range(ref_len + 1)]
+    for i in range(ref_len - 1, -1, -1):
+        dp[i][rec_len] = ref_len - i
+    for j in range(rec_len - 1, -1, -1):
+        dp[ref_len][j] = rec_len - j
+
+    for i in range(ref_len - 1, -1, -1):
+        for j in range(rec_len - 1, -1, -1):
+            best = math.inf
+            if normalized_reference[i] == normalized_recognized[j]:
+                best = dp[i + 1][j + 1]
+            best = min(best, 1 + dp[i + 1][j], 1 + dp[i][j + 1])
+            dp[i][j] = int(best)
+
+    final_words: list[dict] = []
+    i = 0
+    j = 0
+    while i < ref_len and j < rec_len:
+        if normalized_reference[i] == normalized_recognized[j] and dp[i][j] == dp[i + 1][j + 1]:
+            matched = dict(recognized_words[j])
+            matched["word"] = reference_words[i]
+            final_words.append(matched)
+            i += 1
+            j += 1
+            continue
+        if dp[i][j] == 1 + dp[i + 1][j]:
+            final_words.append({"word": reference_words[i], "error_type": "Omission", "score": 0})
+            i += 1
+            continue
+        insertion = dict(recognized_words[j])
+        insertion["error_type"] = "Insertion"
+        final_words.append(insertion)
+        j += 1
+
+    while i < ref_len:
+        final_words.append({"word": reference_words[i], "error_type": "Omission", "score": 0})
+        i += 1
+    while j < rec_len:
+        insertion = dict(recognized_words[j])
+        insertion["error_type"] = "Insertion"
+        final_words.append(insertion)
+        j += 1
+
+    return _mark_mispronunciations(final_words)
+
+
+def _average_score(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    return sum(values) / len(values)
+
+
+def _compute_pronunciation_score(
+    *,
+    accuracy: float,
+    fluency: float,
+    completeness: float,
+    prosody: float | None = None,
+) -> float:
+    parts = [accuracy, fluency, completeness]
+    if prosody is not None:
+        parts.append(prosody)
+    ordered = sorted(parts)
+    if len(ordered) == 4:
+        return 0.4 * ordered[0] + 0.2 * ordered[1] + 0.2 * ordered[2] + 0.2 * ordered[3]
+    return 0.6 * ordered[0] + 0.2 * ordered[1] + 0.2 * ordered[2]
+
+
+def _build_scores_from_aligned_words(
+    reference_text: str,
+    recognized_text: str,
+    aligned_words: list[dict],
+    fluency_scores: list[float],
+    prosody_scores: list[float],
+) -> dict:
+    scored_words = [word for word in aligned_words if word.get("error_type") != "Insertion"]
+    accuracy = _average_score([float(word.get("score", 0) or 0) for word in scored_words]) if scored_words else 0.0
+    reference_count = len(_reference_words(reference_text))
+    pronounced_count = sum(1 for word in aligned_words if word.get("error_type") not in ("Omission", "Insertion"))
+    completeness = (pronounced_count / reference_count * 100) if reference_count else 0.0
+    fluency = _average_score(fluency_scores)
+    prosody = _average_score(prosody_scores) if prosody_scores else None
+    pronunciation = _compute_pronunciation_score(
+        accuracy=accuracy,
+        fluency=fluency,
+        completeness=completeness,
+        prosody=prosody,
+    )
+    return {
+        "recognized_text": recognized_text,
+        "reference_text": reference_text,
+        "scores": {
+            "pronunciation": round(pronunciation, 1),
+            "accuracy": round(accuracy, 1),
+            "fluency": round(fluency, 1),
+            "completeness": round(completeness, 1),
+        },
+        "words": [
+            {
+                "word": str(word.get("word", "")),
+                "error_type": word.get("error_type"),
+                "score": round(float(word.get("score", 0) or 0), 1),
+            }
+            for word in aligned_words
+        ],
+    }
+
+
+def _azure_score_continuous(wav_path: str, reference_text: str, speechsdk) -> dict:
+    speech_key = os.environ.get("AZURE_SPEECH_KEY")
+    region = os.environ.get("AZURE_SPEECH_REGION", "westus")
+
+    speech_config = speechsdk.SpeechConfig(subscription=speech_key, region=region)
+    speech_config.speech_recognition_language = "en-US"
+
+    audio_config = speechsdk.AudioConfig(filename=wav_path)
+    recognizer = speechsdk.SpeechRecognizer(speech_config, audio_config=audio_config)
+
+    pronunciation_config = speechsdk.PronunciationAssessmentConfig(
+        reference_text=reference_text,
+        grading_system=speechsdk.PronunciationAssessmentGradingSystem.HundredMark,
+        granularity=speechsdk.PronunciationAssessmentGranularity.Word,
+        enable_miscue=False,
+    )
+    pronunciation_config.apply_to(recognizer)
+
+    done = threading.Event()
+    recognized_text_parts: list[str] = []
+    recognized_words: list[dict] = []
+    fluency_scores: list[float] = []
+    prosody_scores: list[float] = []
+    canceled_error: list[str] = []
+
+    def on_recognized(evt) -> None:
+        if evt.result.reason != speechsdk.ResultReason.RecognizedSpeech:
+            return
+        text = (evt.result.text or "").strip()
+        if text:
+            recognized_text_parts.append(text)
+        pronunciation_result = speechsdk.PronunciationAssessmentResult(evt.result)
+        fluency_scores.append(float(getattr(pronunciation_result, "fluency_score", 0.0) or 0.0))
+        prosody_score = getattr(pronunciation_result, "prosody_score", None)
+        if prosody_score is not None:
+            prosody_scores.append(float(prosody_score))
+        if getattr(pronunciation_result, "words", None):
+            for word_result in pronunciation_result.words:
+                recognized_words.append(
+                    {
+                        "word": word_result.word,
+                        "error_type": getattr(word_result, "error_type", None) or "None",
+                        "score": round(float(getattr(word_result, "accuracy_score", 0.0) or 0.0), 1),
+                    }
+                )
+
+    def on_stop(evt) -> None:
+        done.set()
+
+    def on_cancel(evt) -> None:
+        details = getattr(evt, "cancellation_details", None)
+        canceled_error.append(str(details) if details else "Recognition canceled")
+        done.set()
+
+    recognizer.recognized.connect(on_recognized)
+    recognizer.session_stopped.connect(on_stop)
+    recognizer.canceled.connect(on_cancel)
+    recognizer.start_continuous_recognition()
+    done.wait()
+    recognizer.stop_continuous_recognition()
+
+    if canceled_error and not recognized_words:
+        return {
+            "error": canceled_error[0],
+            "recognized_text": "",
+            "reference_text": reference_text,
+            "scores": {},
+            "words": [],
+        }
+
+    aligned_words = _align_assessment_words(reference_text, recognized_words)
+    recognized_text = " ".join(part for part in recognized_text_parts if part).strip()
+    return _build_scores_from_aligned_words(
+        reference_text,
+        recognized_text,
+        aligned_words,
+        fluency_scores,
+        prosody_scores,
+    )
 
 
 def _azure_score_impl(wav_path: str, reference_text: str) -> dict:
@@ -997,6 +1489,9 @@ def _azure_score_impl(wav_path: str, reference_text: str) -> dict:
             "reference_text": reference_text,
             "scores": {},
         }
+
+    if get_audio_duration_seconds(wav_path) > 30:
+        return _azure_score_continuous(wav_path, reference_text, speechsdk)
 
     speech_config = speechsdk.SpeechConfig(subscription=speech_key, region=region)
     speech_config.speech_recognition_language = "en-US"
@@ -1220,7 +1715,15 @@ def assess_audio(audio_path: str, output_dir: str | None = None, scripts_dir: st
         matched_track = "unknown"
         matched_unit = None
         canonical_text = whisper_text
-    matched_tracks = choose_report_tracks(matches) if matches else [matched_track]
+    matched_tracks = choose_report_tracks(matches, whisper_text) if matches else [matched_track]
+    track_sections = [
+        (
+            track_num,
+            tracks[track_num]["text"],
+        )
+        for track_num in matched_tracks
+        if track_num in tracks
+    ]
 
     print("  ✨ Generating standard content...")
     if matches:
@@ -1229,9 +1732,12 @@ def assess_audio(audio_path: str, output_dir: str | None = None, scripts_dir: st
             whisper_text,
             best_match["track_header"],
             best_match["unit"],
+            wav_path=wav_path,
+            track_sections=track_sections,
         )
     else:
         standard_text = whisper_text
+    scoring_reference_text = _strip_track_markers(standard_text)
 
     output_paths = build_output_paths(output_dir, base_name)
     with open(output_paths["reference"], "w", encoding="utf-8") as file:
@@ -1239,21 +1745,29 @@ def assess_audio(audio_path: str, output_dir: str | None = None, scripts_dir: st
     print(f"      Saved standard content: {os.path.basename(output_paths['reference'])}")
 
     print("  ⭐ Azure scoring...")
-    scores = azure_score(wav_path, standard_text)
+    scores = azure_score(wav_path, scoring_reference_text)
     if "error" in scores:
         print(f"      ⚠️ {scores['error']}")
     else:
         print(f"      Pronunciation: {scores['scores']['pronunciation']}/100")
 
-    if matches and should_retry_standard_generation(scores):
+    if matches and should_retry_standard_generation(scores) and _standard_is_substantially_shorter_than_transcript(standard_text, whisper_text):
         print("      Refining standard content from Azure recognized text...")
+        retry_evidence_text = " ".join(
+            part.strip()
+            for part in [whisper_text, str(scores.get("recognized_text", ""))]
+            if part and part.strip()
+        )
         retry_standard_text = generate_standard_content(
             canonical_text,
-            scores.get("recognized_text", ""),
+            retry_evidence_text,
             best_match["track_header"],
             best_match["unit"],
+            wav_path=wav_path,
+            track_sections=track_sections,
         )
-        retry_scores = azure_score(wav_path, retry_standard_text)
+        retry_scoring_reference = _strip_track_markers(retry_standard_text)
+        retry_scores = azure_score(wav_path, retry_scoring_reference)
         current_completeness = float(scores.get("scores", {}).get("completeness", 0) or 0)
         retry_completeness = float(retry_scores.get("scores", {}).get("completeness", 0) or 0)
         current_accuracy = float(scores.get("scores", {}).get("accuracy", 0) or 0)

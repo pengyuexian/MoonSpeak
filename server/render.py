@@ -16,31 +16,7 @@ def render_speech_review_page(data: dict[str, object]) -> str:
         for card_class, label, value in score_specs
     )
 
-    line_blocks: list[str] = []
-    for line in data["standard_lines"]:
-        token_html: list[str] = []
-        for token in line["tokens"]:
-            kind = token.get("kind")
-            text = escape(token.get("text", ""))
-            if kind == "word":
-                color = token.get("color", "neutral")
-                detail = escape(token.get("detail_text_cn", ""))
-                token_html.append(
-                    f'<button class="word-chip {color}" data-detail="{detail}" onclick="showWordDetail(this)">{text}</button>'
-                )
-            else:
-                token_html.append(text)
-        line_blocks.append(f'<div class="reading-line">{"".join(token_html)}</div>')
-
     feedback_blocks = "".join(f"<p>{escape(line)}</p>" for line in data["feedback_lines_cn"])
-
-    track_url = data.get("audio_url_track")
-    track_btn_html = (
-        f'<button class="audio-btn track-btn" data-type="original" data-url="{track_url}" onclick="playAudio(this, \'{track_url}\')">'
-        '<span class="icon"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></span>'
-        '<span class="label">播放原声</span></button>'
-        if track_url else ""
-    )
 
     user_url = data.get("audio_url_user")
     user_btn_html = (
@@ -49,6 +25,36 @@ def render_speech_review_page(data: dict[str, object]) -> str:
         '<span class="label">播放跟读</span></button>'
         if user_url else ""
     )
+
+    track_section_blocks: list[str] = []
+    for section in data["track_sections"]:
+        line_blocks: list[str] = []
+        for line in section["lines"]:
+            token_html: list[str] = []
+            for token in line["tokens"]:
+                kind = token.get("kind")
+                text = escape(token.get("text", ""))
+                if kind == "word":
+                    color = token.get("color", "neutral")
+                    detail = escape(token.get("detail_text_cn", ""))
+                    token_html.append(
+                        f'<button class="word-chip {color}" data-detail="{detail}" onclick="showWordDetail(this)">{text}</button>'
+                    )
+                else:
+                    token_html.append(text)
+            line_blocks.append(f'<div class="reading-line">{"".join(token_html)}</div>')
+
+        track_url = section.get("audio_url_track")
+        track_btn_html = (
+            f'<button class="audio-btn track-btn" data-type="original" data-url="{track_url}" onclick="playAudio(this, \'{track_url}\')">'
+            '<span class="icon"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></span>'
+            '<span class="label">播放原声</span></button>'
+            if track_url else ""
+        )
+        header = escape(section["track_num"]) if section.get("track_num") else ""
+        track_section_blocks.append(
+            f'<section class="track-block"><h3>{header}</h3>{"".join(line_blocks)}<div class="audio-controls track-audio">{track_btn_html}</div></section>'
+        )
 
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -153,11 +159,42 @@ def render_speech_review_page(data: dict[str, object]) -> str:
       background: var(--accent-3);
       border-radius: 2px;
     }}
+    .section-heading {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 20px;
+    }}
+    .section-heading h2 {{
+      margin-bottom: 0;
+    }}
+    .section-heading-action {{
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+    }}
     .reading-line {{
       line-height: 1.6;
       font-size: 26px;
       margin-bottom: 8px;
       word-break: break-word;
+    }}
+    .track-block {{
+      padding: 14px 0 18px 0;
+      border-bottom: 1px solid rgba(0,0,0,0.06);
+    }}
+    .track-block:last-of-type {{
+      border-bottom: none;
+      padding-bottom: 8px;
+    }}
+    .track-block h3 {{
+      margin: 0 0 14px 0;
+      font-size: 20px;
+      color: var(--muted);
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      line-height: 1.2;
     }}
     .word-chip {{
       border: none;
@@ -205,13 +242,17 @@ def render_speech_review_page(data: dict[str, object]) -> str:
       padding-top: 16px;
       border-top: 1px solid rgba(0,0,0,0.05);
     }}
+    .track-audio {{
+      margin-top: 14px;
+      padding-top: 12px;
+    }}
     .audio-btn {{
       position: relative;
       overflow: hidden;
       display: inline-flex;
       align-items: center;
       gap: 8px;
-      padding: 10px 20px;
+      padding: 6px 16px;
       border-radius: 999px;
       border: none;
       background: #f0f2f5;
@@ -274,12 +315,11 @@ def render_speech_review_page(data: dict[str, object]) -> str:
       <div class="score-grid">{score_cards}</div>
     </section>
     <section class="card">
-      <h2>正文</h2>
-      {''.join(line_blocks)}
-      <div class="audio-controls">
-        {track_btn_html}
-        {user_btn_html}
+      <div class="section-heading">
+        <h2>正文</h2>
+        <div class="section-heading-action">{user_btn_html}</div>
       </div>
+      {''.join(track_section_blocks)}
     </section>
     <section class="card">
       <h2>反馈</h2>

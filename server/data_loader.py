@@ -119,6 +119,37 @@ def align_standard_text_with_azure(standard_text: str, azure_words: list[dict]) 
     return lines
 
 
+def parse_standard_sections(standard_text: str, azure_words: list[dict]) -> list[dict]:
+    sections: list[dict] = []
+    current_track: str | None = None
+    current_lines: list[str] = []
+
+    def flush_section() -> None:
+        if current_track is None:
+            return
+        section_text = "\n".join(current_lines).strip()
+        sections.append(
+            {
+                "track_num": current_track,
+                "lines": align_standard_text_with_azure(section_text, azure_words) if section_text else [],
+            }
+        )
+
+    for raw_line in standard_text.splitlines():
+        header_match = re.match(r"^##\s+(\d+\.\d+)\s*$", raw_line.strip())
+        if header_match:
+            flush_section()
+            current_track = header_match.group(1)
+            current_lines = []
+            continue
+        current_lines.append(raw_line)
+
+    flush_section()
+    if sections:
+        return sections
+    return [{"track_num": "", "lines": align_standard_text_with_azure(standard_text, azure_words)}]
+
+
 def load_speech_review_page_data(
     evaluations_root: Path, date: str, name: str
 ) -> dict[str, object]:
@@ -126,13 +157,14 @@ def load_speech_review_page_data(
     standard_text = paths["standard"].read_text(encoding="utf-8")
     azure_data = json.loads(paths["azure"].read_text(encoding="utf-8"))
     feedback_cn = parse_feedback_cn_markdown(paths["feedback_cn"].read_text(encoding="utf-8"))
-    aligned_lines = align_standard_text_with_azure(standard_text, azure_data.get("words", []))
-    for line in aligned_lines:
-        for token in line["tokens"]:
-            if token.get("kind") != "word":
-                continue
-            detail = token.get("detail")
-            token["detail_text_cn"] = build_word_detail_cn(detail) if isinstance(detail, dict) else ""
+    track_sections = parse_standard_sections(standard_text, azure_data.get("words", []))
+    for section in track_sections:
+        for line in section["lines"]:
+            for token in line["tokens"]:
+                if token.get("kind") != "word":
+                    continue
+                detail = token.get("detail")
+                token["detail_text_cn"] = build_word_detail_cn(detail) if isinstance(detail, dict) else ""
 
     # Audio paths
     repo_root = evaluations_root.parent
@@ -173,15 +205,14 @@ def load_speech_review_page_data(
         recording_url = f"/audio/user/{date}/{name}.m4a"
 
     # Track: use detected book level
-    track_url = None
-    if feedback_cn["matched_tracks"] and book_level:
-        match = re.search(r"(\d+\.\d+)", feedback_cn["matched_tracks"][0])
-        if match:
-            track_id = match.group(1)
-            # Only search in the detected book level
+    for section in track_sections:
+        track_url = None
+        track_id = section.get("track_num") or ""
+        if track_id and book_level:
             track_path = repo_root / "books" / "Power_Up" / book_level / "Tracks" / f"{track_id}.mp3"
             if track_path.exists():
                 track_url = f"/audio/track/{book_level}/{track_id}.mp3"
+        section["audio_url_track"] = track_url
 
     return {
         "name": name,
@@ -192,7 +223,6 @@ def load_speech_review_page_data(
         "score_lines_cn": feedback_cn["score_lines"],
         "problem_word_lines_cn": feedback_cn["problem_word_lines"],
         "feedback_lines_cn": feedback_cn["feedback_lines"],
-        "standard_lines": aligned_lines,
+        "track_sections": track_sections,
         "audio_url_user": recording_url,
-        "audio_url_track": track_url,
     }

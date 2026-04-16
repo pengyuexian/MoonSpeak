@@ -10,6 +10,7 @@ from server.data_loader import (
     build_word_detail_cn,
     classify_word_color,
     load_speech_review_page_data,
+    parse_standard_sections,
     parse_feedback_cn_markdown,
 )
 from server.http_server import parse_speech_path
@@ -123,6 +124,22 @@ class SpeechServerAlignmentTests(unittest.TestCase):
         self.assertEqual("yellow", lines[0]["tokens"][0]["color"])
         self.assertEqual("green", lines[0]["tokens"][2]["color"])
 
+    def test_parse_standard_sections_splits_track_groups(self) -> None:
+        sections = parse_standard_sections(
+            "## 5.05\nThe Friendly Farm\nGracie! What are you eating?\n## 5.06\nMum's the angriest animal in the barn!",
+            [
+                {"word": "The", "error_type": "None", "score": 90},
+                {"word": "Friendly", "error_type": "None", "score": 88},
+                {"word": "Farm", "error_type": "None", "score": 84},
+                {"word": "Gracie", "error_type": "None", "score": 94},
+                {"word": "Mum's", "error_type": "None", "score": 85},
+            ],
+        )
+
+        self.assertEqual(["5.05", "5.06"], [section["track_num"] for section in sections])
+        self.assertEqual("The Friendly Farm", sections[0]["lines"][0]["text"])
+        self.assertEqual("Mum's the angriest animal in the barn!", sections[1]["lines"][0]["text"])
+
     def test_build_word_detail_cn_formats_omission_and_mispronunciation_branches(self) -> None:
         self.assertEqual(
             "这个词这次漏读了。当前分数：0",
@@ -144,7 +161,7 @@ class SpeechServerLoaderTests(unittest.TestCase):
             base = Path(tmp_dir) / "evaluations" / "2026-04-14"
             base.mkdir(parents=True)
             (base / "Read_PB58.standard.txt").write_text(
-                "The Friendly Farm,\nGracie! What are you eating?\nGhost\n",
+                "## 5.05\nThe Friendly Farm,\nGracie! What are you eating?\nGhost\n",
                 encoding="utf-8",
             )
             (base / "Read_PB58.azure.json").write_text(
@@ -187,14 +204,16 @@ class SpeechServerLoaderTests(unittest.TestCase):
         self.assertEqual(["5.05"], data["matched_tracks"])
         self.assertEqual(["发音：71.6/100"], data["score_lines_cn"])
         self.assertEqual(["你这次一直坚持读完了。"], data["feedback_lines_cn"])
-        self.assertEqual(3, len(data["standard_lines"]))
+        self.assertEqual(1, len(data["track_sections"]))
+        self.assertEqual("5.05", data["track_sections"][0]["track_num"])
+        self.assertEqual(3, len(data["track_sections"][0]["lines"]))
         self.assertEqual(
             "这个词整体比较稳定。当前分数：94",
-            data["standard_lines"][0]["tokens"][0]["detail_text_cn"],
+            data["track_sections"][0]["lines"][0]["tokens"][0]["detail_text_cn"],
         )
         self.assertEqual(
             "",
-            data["standard_lines"][2]["tokens"][0]["detail_text_cn"],
+            data["track_sections"][0]["lines"][2]["tokens"][0]["detail_text_cn"],
         )
 
 
@@ -215,26 +234,33 @@ class SpeechServerRenderTests(unittest.TestCase):
                 "score_lines_cn": ["发音：71.6/100"],
                 "problem_word_lines_cn": ["Is：这个英文单词漏读了（分数：0）"],
                 "feedback_lines_cn": ["你这次一直坚持读完了。"],
-                "standard_lines": [
+                "track_sections": [
                     {
-                        "text": "Is that Jim's picture of the wildlife park?",
-                        "tokens": [
+                        "track_num": "5.05",
+                        "audio_url_track": "/audio/track/2/5.05.mp3",
+                        "lines": [
                             {
-                                "text": "Is",
-                                "kind": "word",
-                                "color": "red",
-                                "detail_text_cn": "这个词这次漏读了。当前分数：0",
-                            },
-                            {"text": " ", "kind": "space"},
-                            {
-                                "text": "that",
-                                "kind": "word",
-                                "color": "neutral",
-                                "detail_text_cn": "",
-                            },
+                                "text": "Is that Jim's picture of the wildlife park?",
+                                "tokens": [
+                                    {
+                                        "text": "Is",
+                                        "kind": "word",
+                                        "color": "red",
+                                        "detail_text_cn": "这个词这次漏读了。当前分数：0",
+                                    },
+                                    {"text": " ", "kind": "space"},
+                                    {
+                                        "text": "that",
+                                        "kind": "word",
+                                        "color": "neutral",
+                                        "detail_text_cn": "",
+                                    },
+                                ],
+                            }
                         ],
                     }
                 ],
+                "audio_url_user": "/audio/user/2026-04-14/Read_PB58.wav",
             }
         )
         self.assertIn("speech-page", html)
@@ -252,6 +278,12 @@ class SpeechServerRenderTests(unittest.TestCase):
         self.assertIn("score-card score-card-completeness", html)
         self.assertIn("score-card-label", html)
         self.assertIn("score-card-value", html)
+        self.assertIn("<h3>5.05</h3>", html)
+        self.assertIn("section-heading", html)
+        self.assertIn("section-heading-action", html)
+        self.assertIn("播放原声", html)
+        self.assertIn("播放跟读", html)
+        self.assertNotIn("min-height: 40px", html)
         self.assertIn("<h2>反馈</h2>", html)
         self.assertNotIn("<h2>中文反馈</h2>", html)
         self.assertNotIn("<p>发音：71.6/100</p>", html)
