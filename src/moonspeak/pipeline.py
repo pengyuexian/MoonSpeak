@@ -888,32 +888,104 @@ def build_feedback_fallback_cn(problem_words: list[dict], scores: dict | None = 
     return " ".join(sentences[: 2 + len(problem_words)])
 
 
+def build_feedback_prompt_cn(scores: dict, recognized_text: str, reference_text: str, problem_words: list[dict]) -> str:
+    problem_summary = "\n".join(
+        f'- "{item["word"]}" ({item["error_type"]}, score {item["score"]})'
+        for item in problem_words
+    ) or "- none"
+    return f"""一个孩子刚完成英语朗读，请用中文写一段鼓励但有指导性的反馈。
+
+参考原文：{reference_text}
+识别结果：{recognized_text}
+评分：{scores}
+重点问题词：
+{problem_summary}
+
+要求：
+- 只输出中文反馈正文
+- 适合孩子和家长阅读
+- 先肯定孩子的投入和完成情况，再给具体练习建议
+- 如果引用英文词，必须保持英文原样，例如 "it"
+- 不要把这些英文词翻译成中文
+- 如果上面列出了重点问题词，要逐个提到，并且保持英文引号中的拼写不变
+- 不要说问题词读得很好、很清楚、很准确
+- 反馈保持 3 到 5 句，内容具体，不要写成列表
+
+只返回反馈正文。"""
+
+
 def _feedback_covers_problem_words(text: str, problem_words: list[dict]) -> bool:
-    lowered = text.lower()
-    required_words = [str(item.get("word", "")).lower() for item in problem_words if item.get("word")]
-    return all(word in lowered for word in required_words)
+    for item in problem_words:
+        word = str(item.get("word", "")).strip()
+        if not word:
+            continue
+        if not re.search(rf"(?<![A-Za-z']){re.escape(word)}(?![A-Za-z'])", text, flags=re.IGNORECASE):
+            return False
+    return True
+
+
+def _feedback_is_mostly_chinese(text: str) -> bool:
+    han_chars = re.findall(r"[\u4e00-\u9fff]", text)
+    latin_words = re.findall(r"[A-Za-z]+(?:'[A-Za-z]+)?", text)
+    if len(han_chars) < 8:
+        return False
+    return len(han_chars) > len(latin_words)
+
+
+def _feedback_mentions_translated_alias(text: str, problem_words: list[dict]) -> bool:
+    for item in problem_words:
+        word = str(item.get("word", "")).strip()
+        if not word:
+            continue
+        alias_window_patterns = [
+            rf'[“「][^”」\n]{{1,12}}[”」][^。！？.!?\n]{{0,20}}(?:也就是|就是|意思是|也叫|叫做|叫作)\s*["\'“”‘’]{re.escape(word)}["\'“”‘’]',
+            rf'["\'“”‘’]{re.escape(word)}["\'“”‘’][^。！？.!?\n]{{0,20}}(?:也就是|就是|意思是|也叫|叫做|叫作)\s*[“「][^”」\n]{{1,12}}[”」]',
+            rf'["\'“”‘’]{re.escape(word)}["\'“”‘’][^。！？.!?\n]{{0,20}}(?:也就是|就是|意思是|也叫|叫做|叫作)\s*["\'“”‘’][^"\'“”‘’\n]*[\u4e00-\u9fff][^"\'“”‘’\n]*["\'“”‘’]',
+            rf'["\'“”‘’][^"\'“”‘’\n]*[\u4e00-\u9fff][^"\'“”‘’\n]*["\'“”‘’][^。！？.!?\n]{{0,20}}(?:也就是|就是|意思是|也叫|叫做|叫作)\s*["\'“”‘’]{re.escape(word)}["\'“”‘’]',
+            rf'(?<![A-Za-z]){re.escape(word)}(?![A-Za-z])[^。！？.!?\n]{{0,12}}(?:的意思是|就是|意思是|也叫|叫做|叫作)[^。！？.!?\n]{{0,8}}[\u4e00-\u9fff]+',
+            rf'[\u4e00-\u9fff]+[^。！？.!?\n]{{0,8}}(?:\(["\'“”‘’]{re.escape(word)}["\'“”‘’]\)|（["\'“”‘’]{re.escape(word)}["\'“”‘’]）)',
+            rf'["\'“”‘’]{re.escape(word)}["\'“”‘’][^。！？.!?\n]{{0,8}}(?:\([\u4e00-\u9fff]+\)|（[\u4e00-\u9fff]+）)',
+        ]
+        if any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in alias_window_patterns):
+            return True
+    return False
 
 
 def _feedback_has_contradictions(text: str, problem_words: list[dict]) -> bool:
-    positive_cues = ("great", "well", "clear", "clearly", "fantastic", "excellent", "good")
-    negative_cues = ("practice", "tricky", "work on", "more clearly", "more carefully", "miss", "skip")
-    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+    sentences = re.split(r"(?<=[.!?。！？])\s*", text.strip())
     for item in problem_words:
-        word = str(item.get("word", "")).lower()
+        word = str(item.get("word", "")).strip()
         if not word:
             continue
         for sentence in sentences:
-            lowered = sentence.lower()
-            if word not in lowered:
+            if word.lower() not in sentence.lower():
                 continue
-            if any(cue in lowered for cue in positive_cues) and not any(cue in lowered for cue in negative_cues):
+
+            escaped_word = re.escape(word)
+            praise_patterns = [
+                rf'["\']{escaped_word}["\'][^.!?。！？\n]{{0,30}}\b(?:really well|very well|well|clearly|great|excellent|fantastic|good)\b',
+                rf'\b(?:read|said|pronounced)\b[^.!?。！？\n]{{0,20}}["\']{escaped_word}["\'][^.!?。！？\n]{{0,20}}\b(?:really well|very well|well|clearly|great|excellent|fantastic|good)\b',
+                rf'\b(?:read|said|pronounced)\b[^.!?。！？\n]{{0,20}}(?<![A-Za-z]){escaped_word}(?![A-Za-z])[^.!?。！？\n]{{0,20}}\b(?:really well|very well|well|clearly|great|excellent|fantastic|good)\b',
+                rf'(?<![A-Za-z]){escaped_word}(?![A-Za-z])\s+was\s+(?:good|clear)\b',
+                rf'["\']{escaped_word}["\'][^。！？.!?\n]{{0,20}}(?:读得很好|读得很清楚|很清楚|很好|不错|很准确)',
+                rf'(?:把|将)?\s*["\']{escaped_word}["\'][^。！？.!?\n]{{0,12}}(?:读得很好|读得很清楚|说得很好|很清楚|很好|不错|很准确)',
+                rf'[“‘]{escaped_word}[”’][^.!?。！？\n]{{0,30}}\b(?:really well|very well|well|clearly|great|excellent|fantastic|good)\b',
+                rf'\b(?:read|said|pronounced)\b[^.!?。！？\n]{{0,20}}[“‘]{escaped_word}[”’][^.!?。！？\n]{{0,20}}\b(?:really well|very well|well|clearly|great|excellent|fantastic|good)\b',
+                rf'[“‘]{escaped_word}[”’][^。！？.!?\n]{{0,20}}(?:读得很好|读得很清楚|很清楚|很好|不错|很准确)',
+                rf'(?:把|将)?\s*[“‘]{escaped_word}[”’][^。！？.!?\n]{{0,12}}(?:读得很好|读得很清楚|说得很好|很清楚|很好|不错|很准确)',
+                rf'[「]{escaped_word}[」][^.!?。！？\n]{{0,30}}\b(?:really well|very well|well|clearly|great|excellent|fantastic|good)\b',
+                rf'[「]{escaped_word}[」][^。！？.!?\n]{{0,20}}(?:读得很好|读得很清楚|很清楚|很好|不错|很准确)',
+                rf'(?:把|将)?\s*[「]{escaped_word}[」][^。！？.!?\n]{{0,12}}(?:读得很好|读得很清楚|说得很好|很清楚|很好|不错|很准确)',
+                rf'(?<![A-Za-z]){escaped_word}(?![A-Za-z])[^。！？.!?\n]{{0,12}}(?:读得很好|读得很清楚|说得很好|很清楚|很好|不错|很准确)',
+            ]
+            if any(re.search(pattern, sentence, flags=re.IGNORECASE) for pattern in praise_patterns):
                 return True
     return False
 
 
 def _feedback_looks_complete(text: str) -> bool:
     stripped = text.strip()
-    return len(stripped) >= 60 and stripped[-1] in ".!?"
+    return len(stripped) >= 60 and stripped[-1] in ".!?。！？"
 
 
 def _normalize_for_match(text: str) -> str:
@@ -1618,6 +1690,35 @@ Return only the feedback."""
     return build_feedback_fallback_en(problem_words)
 
 
+def llm_generate_feedback_cn(scores: dict, recognized_text: str, reference_text: str, problem_words: list[dict]) -> str:
+    """Generate Chinese feedback directly, with validation and fallback."""
+    prompt = build_feedback_prompt_cn(scores, recognized_text, reference_text, problem_words)
+    system_prompt = "你是一位给儿童英语朗读提供反馈的老师。"
+
+    for chat in (llm_chat, llm_chat_glm):
+        try:
+            result = chat(
+                system_prompt,
+                prompt,
+                temperature=0.2,
+                max_tokens=700,
+            )
+        except Exception:
+            continue
+
+        if (
+            result
+            and _feedback_is_mostly_chinese(result)
+            and _feedback_looks_complete(result)
+            and _feedback_covers_problem_words(result, problem_words)
+            and not _feedback_mentions_translated_alias(result, problem_words)
+            and not _feedback_has_contradictions(result, problem_words)
+        ):
+            return result.strip()
+
+    return build_feedback_fallback_cn(problem_words, scores)
+
+
 def build_translation_prompt(feedback_en: str) -> str:
     return f"""Translate the following English feedback for a child's English pronunciation practice into Chinese.
 
@@ -1775,6 +1876,7 @@ def assess_audio(audio_path: str, output_dir: str | None = None, scripts_dir: st
             retry_completeness == current_completeness and retry_accuracy >= current_accuracy
         ):
             standard_text = retry_standard_text
+            scoring_reference_text = retry_scoring_reference
             scores = retry_scores
             with open(output_paths["reference"], "w", encoding="utf-8") as file:
                 file.write(standard_text)
@@ -1787,11 +1889,14 @@ def assess_audio(audio_path: str, output_dir: str | None = None, scripts_dir: st
         json.dump(scores, file, ensure_ascii=False, indent=2)
 
     print("  💬 Generating feedback...")
-    feedback_input = dict(scores.get("scores", {}))
-    feedback_input["words"] = scores.get("words", [])
     problem_words = extract_problem_words(scores)
     feedback_en = build_feedback_fallback_en(problem_words, scores.get("scores", {}))
-    feedback_cn = build_feedback_fallback_cn(problem_words, scores.get("scores", {}))
+    feedback_cn = llm_generate_feedback_cn(
+        scores=scores.get("scores", {}),
+        recognized_text=str(scores.get("recognized_text", "")),
+        reference_text=scoring_reference_text,
+        problem_words=problem_words,
+    )
 
     result_md = render_feedback_report_cn(
         base_name=base_name,
