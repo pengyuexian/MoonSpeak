@@ -13,4 +13,4 @@ cd "$ROOT_DIR"
 
 RESULT_JSON="$(conda run --no-capture-output -n moonspeak env PYTHONPATH=.:src python -m moonspeak.run_assessment "$1")"
 
-python3 -c 'import json,sys; data=json.loads(sys.argv[1]); print(data["report_url"] if data.get("success") else data["error"]); sys.exit(0 if data.get("success") else 1)' "$RESULT_JSON"
+python3 -c 'import json,sys; data=json.loads(sys.argv[1]); error_type=data.get("error_type","runtime_failure"); error=data.get("error","Unknown error"); print(data["report_url"] if data.get("success") else "{}: {}".format(error_type, error)); sys.exit(0 if data.get("success") else 1)' "$RESULT_JSON"

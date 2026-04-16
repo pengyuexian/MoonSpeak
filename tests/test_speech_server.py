@@ -414,8 +414,13 @@ class SpeechServerRenderTests(unittest.TestCase):
         self.assertIn("播放跟读", html)
         self.assertNotIn("min-height: 40px", html)
         self.assertIn("<h2>反馈</h2>", html)
+        self.assertIn(".reading-line {", html)
+        self.assertIn(".reading-line {\n      line-height: 1.6;\n      font-size: 22px;", html)
+        self.assertIn(".feedback-copy p {", html)
+        self.assertIn(".feedback-copy p {\n      margin: 0 0 14px 0;\n      font-size: 20px;", html)
+        self.assertIn("line-height: 1.75;", html)
         self.assertIn(
-            "AI 生成的反馈可能不完全准确，请结合录音和实际朗读情况一起判断。",
+            "AI未必完全准确，请结合录音和实际朗读情况一起判断。",
             html,
         )
         self.assertIn("feedback-disclaimer", html)

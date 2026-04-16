@@ -19,7 +19,7 @@ def render_speech_review_page(data: dict[str, object]) -> str:
     feedback_blocks = "".join(f"<p>{escape(line)}</p>" for line in data["feedback_lines"])
     feedback_disclaimer = (
         '<p class="feedback-disclaimer">'
-        "AI 生成的反馈可能不完全准确，请结合录音和实际朗读情况一起判断。"
+        "AI未必完全准确，请结合录音和实际朗读情况一起判断。"
         "</p>"
     )
 
@@ -181,7 +181,7 @@ def render_speech_review_page(data: dict[str, object]) -> str:
     }}
     .reading-line {{
       line-height: 1.6;
-      font-size: 26px;
+      font-size: 22px;
       margin-bottom: 8px;
       word-break: break-word;
     }}
@@ -310,6 +310,14 @@ def render_speech_review_page(data: dict[str, object]) -> str:
     .audio-btn.playing {{
       box-shadow: 0 2px 8px rgba(0,0,0,0.05);
     }}
+    .feedback-copy p {{
+      margin: 0 0 14px 0;
+      font-size: 20px;
+      line-height: 1.75;
+    }}
+    .feedback-copy p:last-child {{
+      margin-bottom: 0;
+    }}
     .feedback-disclaimer {{
       margin-top: 14px;
       color: var(--muted);
@@ -334,7 +342,7 @@ def render_speech_review_page(data: dict[str, object]) -> str:
     </section>
     <section class="card">
       <h2>反馈</h2>
-      {feedback_blocks}
+      <div class="feedback-copy">{feedback_blocks}</div>
       {feedback_disclaimer}
     </section>
   </main>

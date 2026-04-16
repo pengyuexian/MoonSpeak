@@ -78,6 +78,13 @@ MATCH_STOPWORDS = LOW_VALUE_WORDS | {
     "hmm",
     "so",
 }
+MIN_RELIABLE_MATCH_SCORE = 0.45
+MIN_STRONG_MATCH_SCORE = 0.65
+MIN_RELIABLE_MATCH_GAP = 0.08
+
+
+class NoReliableMatchError(RuntimeError):
+    """Raised when the transcript cannot be matched to textbook content with enough confidence."""
 
 
 def _timeout_worker(result_queue: multiprocessing.Queue, func, args: tuple) -> None:
@@ -420,9 +427,15 @@ def _select_track_lines(
                 selected_indexes.add(last_idx + 1)
 
     selected_lines: list[str] = []
-    for idx in sorted(selected_indexes):
+    ordered_indexes = sorted(selected_indexes)
+    while len(ordered_indexes) > 1 and not _line_matches_transcript_prefix_windows(
+        candidate_lines[ordered_indexes[0]], transcript_text
+    ):
+        ordered_indexes.pop(0)
+
+    for idx in ordered_indexes:
         line = candidate_lines[idx]
-        if idx == min(selected_indexes):
+        if idx == ordered_indexes[0]:
             line = _trim_repeated_intro_phrase(line, transcript_text)
         selected_lines.append(line)
     return selected_lines
@@ -626,6 +639,19 @@ def _line_matches_transcript_suffix_windows(line: str, transcript_text: str) -> 
     for size in sorted({len(line_tokens), len(line_tokens) + 1, len(line_tokens) + 2}):
         suffix = " ".join(transcript_words[-size:])
         if _line_matches_transcript_tail(line, suffix):
+            return True
+    return False
+
+
+def _line_matches_transcript_prefix_windows(line: str, transcript_text: str) -> bool:
+    transcript_words = re.findall(r"[A-Za-z']+", transcript_text.replace("’", "'"))
+    normalized_line = _normalize_line_for_compare(line)
+    line_tokens = normalized_line.split()
+    if not transcript_words or not line_tokens:
+        return False
+    for size in sorted({len(line_tokens), len(line_tokens) + 1, len(line_tokens) + 2}):
+        prefix = " ".join(transcript_words[:size])
+        if _line_matches_transcript_tail(line, prefix):
             return True
     return False
 
@@ -862,54 +888,162 @@ def build_feedback_fallback_cn(problem_words: list[dict], scores: dict | None = 
     if not problem_words:
         return "你这次一直坚持读完了，很不错。继续练习，读每一行的时候慢一点、清楚一点。"
 
-    sentences = ["你这次一直坚持读完了，这说明你的专注力很好。"]
+    clues = build_feedback_clues(problem_words, "", "")
     fluency = float(scores.get("fluency", 0) or 0)
-    if fluency >= 70:
-        sentences.append("这次读得比较顺，继续保持这个节奏。")
+    completeness = float(scores.get("completeness", 0) or 0)
+    if fluency >= 75 and completeness >= 85:
+        intro = "整体上你这次读得比较顺，也基本把内容读完整了。"
+    elif fluency >= 70:
+        intro = "整体上你这次读得还比较稳，后面只要把几个重点词再读清楚一点就会更好。"
     else:
-        sentences.append("下次可以再慢一点，这样每个单词会更清楚。")
+        intro = "你这次坚持把内容读下来了，这很好。接下来重点是把容易出错的地方放慢一点读。"
 
-    for item in problem_words:
-        word = item.get("word", "")
-        error_type = item.get("error_type")
-        score = float(item.get("score", 0) or 0)
-        if error_type == "Omission":
-            sentences.append(f'下次读到这里时，要把 "{word}" 这个英文单词读出来，这次它被漏掉了。')
-        elif error_type == "Insertion":
-            sentences.append(f'这次多读了 "{word}"，下次要更贴着原文来读。')
+    details: list[str] = []
+    for clue in clues[:3]:
+        word = clue["word"]
+        line = clue["reference_line"]
+        line_prefix = f'在 “{line}” 这句里，' if line else ""
+        practice_tip = clue["practice_tip"]
+        if clue["error_type"] == "Omission":
+            sentence = f'{line_prefix}"{word}" 这次漏掉了。{practice_tip}'
+        elif clue["error_type"] == "Insertion":
+            sentence = f'{line_prefix}"{word}" 这次多带出来了。{practice_tip}'
         else:
-            if score < 25:
-                detail = "还需要重点练习"
-            elif score < 60:
-                detail = "还需要继续练习"
-            else:
-                detail = "这次有一点不够清楚"
-            sentences.append(f'请再练习 "{word}"。这个英文单词{detail}，可以放慢一点，把每个部分读清楚。')
-    return " ".join(sentences[: 2 + len(problem_words)])
+            sentence = f'{line_prefix}"{word}" 已经读出来了，但发音还不够清楚。{practice_tip}'
+        details.append(sentence)
+
+    return " ".join([intro, *details])
+
+
+def _feedback_reference_line(reference_text: str, word: str) -> str:
+    if not reference_text.strip() or not word.strip():
+        return ""
+    pattern = re.compile(rf"(?<![A-Za-z']){re.escape(word)}(?![A-Za-z'])", re.IGNORECASE)
+    for line in reference_text.splitlines():
+        stripped = line.strip()
+        if stripped and pattern.search(stripped):
+            return stripped
+    return ""
+
+
+def _feedback_issue_label(error_type: str) -> str:
+    if error_type == "Omission":
+        return "漏读"
+    if error_type == "Insertion":
+        return "多读"
+    return "发音不清"
+
+
+def _feedback_practice_tip(word: str, error_type: str, reference_line: str) -> str:
+    lowered = word.lower()
+    alpha_only = re.sub(r"[^a-z]", "", lowered)
+    reference_tokens = re.findall(r"[A-Za-z']+", reference_line.lower())
+    is_line_start = bool(reference_tokens) and reference_tokens[0] == lowered
+
+    if error_type == "Omission":
+        if is_line_start or len(alpha_only) <= 3 or lowered in LOW_VALUE_WORDS:
+            return f'这是句子开头容易漏掉的小词，起句时先慢一点，把 "{word}" 单独带出来。'
+        return f'这个词在原句里不能跳过去，读到这里时先看清位置，再把 "{word}" 完整带出来。'
+
+    if error_type == "Insertion":
+        return f'这里原文里没有 "{word}"，读的时候眼睛要更贴着原文往下走，不要顺着语感自己加词。'
+
+    if lowered.endswith("iest") or lowered.endswith("est"):
+        return "这是最高级词尾，结尾的 /st/ 要收住，不要只把前半段读出来。"
+    if "'" in word or "’" in word:
+        return "这个词里有所有格或缩写，前半部分和结尾都要交代清楚，不要一带而过。"
+    if len(alpha_only) >= 7:
+        return f'"{word}" 是比较长的词，可以分成两到三个小段慢一点读，把中间的声音也读清楚。'
+    return f'下次读到 "{word}" 时可以再慢一点，把每个部分都读清楚。'
+
+
+def _feedback_recognized_hint(word: str, recognized_text: str, error_type: str) -> str:
+    if error_type == "Omission" or not recognized_text.strip():
+        return ""
+
+    recognized_tokens = re.findall(r"[A-Za-z']+", recognized_text)
+    lowered_word = word.lower().replace("’", "'")
+    similar_tokens: list[tuple[float, str]] = []
+    for token in recognized_tokens:
+        lowered_token = token.lower().replace("’", "'")
+        if lowered_token == lowered_word:
+            continue
+        ratio = difflib.SequenceMatcher(None, lowered_word, lowered_token).ratio()
+        if ratio >= 0.6:
+            similar_tokens.append((ratio, token))
+
+    if not similar_tokens:
+        return ""
+    similar_tokens.sort(reverse=True)
+    return similar_tokens[0][1]
+
+
+def _feedback_clue_from_item(item: dict, reference_text: str, recognized_text: str) -> dict:
+    word = str(item.get("word", "")).strip()
+    error_type = str(item.get("error_type", "") or "Mispronunciation")
+    reference_line = str(item.get("reference_line", "") or _feedback_reference_line(reference_text, word))
+    return {
+        "word": word,
+        "error_type": error_type,
+        "score": float(item.get("score", 0) or 0),
+        "issue_label": str(item.get("issue_label", "") or _feedback_issue_label(error_type)),
+        "reference_line": reference_line,
+        "practice_tip": str(item.get("practice_tip", "") or _feedback_practice_tip(word, error_type, reference_line)),
+        "recognized_hint": str(item.get("recognized_hint", "") or _feedback_recognized_hint(word, recognized_text, error_type)),
+    }
+
+
+def build_feedback_clues(problem_words: list[dict], reference_text: str, recognized_text: str) -> list[dict]:
+    clues: list[dict] = []
+    for item in problem_words:
+        word = str(item.get("word", "")).strip()
+        if not word:
+            continue
+        clues.append(_feedback_clue_from_item(item, reference_text, recognized_text))
+    return clues
 
 
 def build_feedback_prompt_cn(scores: dict, recognized_text: str, reference_text: str, problem_words: list[dict]) -> str:
-    problem_summary = "\n".join(
-        f'- "{item["word"]}" ({item["error_type"]}, score {item["score"]})'
-        for item in problem_words
-    ) or "- none"
-    return f"""一个孩子刚完成英语朗读，请用中文写一段鼓励但有指导性的反馈。
+    feedback_clues = build_feedback_clues(problem_words, reference_text, recognized_text)
+    problem_summary_blocks: list[str] = []
+    for clue in feedback_clues:
+        score = clue["score"]
+        score_text = str(int(score)) if isinstance(score, float) and score.is_integer() else str(score)
+        problem_summary_blocks.append(
+            "\n".join(
+                [
+                    f'- "{clue["word"]}" ({clue["error_type"]}, score {score_text})',
+                    f'  词: "{clue["word"]}"',
+                    f'  问题类型: {clue["issue_label"]}',
+                    f'  所在原句: {clue["reference_line"] or "unknown"}',
+                    f'  识别参考: {clue["recognized_hint"] or "none"}',
+                    f'  练习提醒: {clue["practice_tip"]}',
+                ]
+            )
+        )
+    problem_summary = "\n".join(problem_summary_blocks) or "- none"
+    return f"""你是一位AI英语老师。一个孩子刚完成英语朗读，请用中文写一段鼓励但有指导性的反馈。
 
 参考原文：{reference_text}
 识别结果：{recognized_text}
 评分：{scores}
-重点问题词：
+重点问题词线索：
 {problem_summary}
 
 要求：
 - 只输出中文反馈正文
-- 适合孩子和家长阅读
+- 角色固定为 AI英语老师
+- 不要使用家长口吻，不要写“妈妈爱你”“妈妈为你骄傲”这类内容
+- 不要写“老师注意到”“老师发现”“作为老师”“我建议你”这类角色代入句式
 - 先肯定孩子的投入和完成情况，再给具体练习建议
+- 先给一句整体判断，再挑 2 到 3 个最值得练的点展开
+- 如果提到问题词，尽量结合它所在的原句来说明是在哪种情况下要注意
+- 不要猜测具体读成了什么词，也不要写“听起来像读成了 X”这种容易引起歧义的话
 - 如果引用英文词，必须保持英文原样，例如 "it"
 - 不要把这些英文词翻译成中文
 - 如果上面列出了重点问题词，要逐个提到，并且保持英文引号中的拼写不变
 - 不要说问题词读得很好、很清楚、很准确
-- 反馈保持 3 到 5 句，内容具体，不要写成列表
+- 反馈保持 4 到 6 句，内容具体，不要写成列表
 
 只返回反馈正文。"""
 
@@ -981,6 +1115,19 @@ def _feedback_has_contradictions(text: str, problem_words: list[dict]) -> bool:
             if any(re.search(pattern, sentence, flags=re.IGNORECASE) for pattern in praise_patterns):
                 return True
     return False
+
+
+def _feedback_has_roleplay(text: str) -> bool:
+    roleplay_patterns = [
+        r"老师注意到",
+        r"老师发现",
+        r"作为老师",
+        r"老师觉得",
+        r"我建议你",
+        r"我建议先",
+        r"我想提醒你",
+    ]
+    return any(re.search(pattern, text) for pattern in roleplay_patterns)
 
 
 def _feedback_looks_complete(text: str) -> bool:
@@ -1170,6 +1317,20 @@ def find_best_match(whisper_text: str, tracks: dict[str, dict], top_n: int = 5) 
 
     matches.sort(key=lambda item: item["score"], reverse=True)
     return matches[:top_n]
+
+
+def is_reliable_textbook_match(matches: list[dict]) -> bool:
+    if not matches:
+        return False
+
+    best_score = float(matches[0].get("score", 0) or 0)
+    if best_score < MIN_RELIABLE_MATCH_SCORE:
+        return False
+    if best_score >= MIN_STRONG_MATCH_SCORE:
+        return True
+
+    second_score = float(matches[1].get("score", 0) or 0) if len(matches) > 1 else 0.0
+    return (best_score - second_score) >= MIN_RELIABLE_MATCH_GAP
 
 
 def llm_chat(system_prompt: str, user_prompt: str, temperature: float = 0.2, max_tokens: int = 1200) -> str:
@@ -1713,6 +1874,7 @@ def llm_generate_feedback_cn(scores: dict, recognized_text: str, reference_text:
             and _feedback_covers_problem_words(result, problem_words)
             and not _feedback_mentions_translated_alias(result, problem_words)
             and not _feedback_has_contradictions(result, problem_words)
+            and not _feedback_has_roleplay(result)
         ):
             return result.strip()
 
@@ -1801,7 +1963,7 @@ def assess_audio(audio_path: str, output_dir: str | None = None, scripts_dir: st
     print(f"      Loaded {len(tracks)} tracks")
     matches = find_best_match(whisper_text, tracks)
 
-    if matches:
+    if matches and is_reliable_textbook_match(matches):
         best_match = matches[0]
         print(
             f"      Best match: Unit {best_match['unit']} / {best_match['track_header']} "
@@ -1810,12 +1972,20 @@ def assess_audio(audio_path: str, output_dir: str | None = None, scripts_dir: st
         matched_track = best_match["track_num"]
         matched_unit = best_match["unit"]
         canonical_text = best_match["text"]
+        match_score = float(best_match["score"])
+        second_match_score = float(matches[1]["score"]) if len(matches) > 1 else 0.0
     else:
-        print("      ⚠️ No matching track found, falling back to Whisper text")
-        matched_track = "unknown"
-        matched_unit = None
-        canonical_text = whisper_text
-    matched_tracks = choose_report_tracks(matches, whisper_text) if matches else [matched_track]
+        if matches:
+            best_score = float(matches[0].get("score", 0) or 0)
+            second_score = float(matches[1].get("score", 0) or 0) if len(matches) > 1 else 0.0
+            print(
+                f"      ⚠️ Textbook match confidence too low "
+                f"(best={best_score:.2f}, second={second_score:.2f})"
+            )
+        else:
+            print("      ⚠️ No matching track found")
+        raise NoReliableMatchError("No reliable textbook match found")
+    matched_tracks = choose_report_tracks(matches, whisper_text)
     track_sections = [
         (
             track_num,
@@ -1916,6 +2086,8 @@ def assess_audio(audio_path: str, output_dir: str | None = None, scripts_dir: st
         "whisper_text": whisper_text,
         "matched_unit": matched_unit,
         "matched_track": matched_track,
+        "match_score": match_score,
+        "second_match_score": second_match_score,
         "standard_text": standard_text,
         "recognized_text": scores.get("recognized_text", ""),
         "scores": scores.get("scores", {}),

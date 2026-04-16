@@ -15,6 +15,7 @@ from moonspeak.pipeline import (
     azure_score,
     standard_matches_canonical_lines,
     build_standard_content_prompt,
+    build_feedback_clues,
     build_feedback_fallback_en,
     build_feedback_fallback_cn,
     build_feedback_prompt_cn,
@@ -33,6 +34,7 @@ from moonspeak.pipeline import (
     choose_report_tracks,
     extract_problem_words,
     find_best_match,
+    is_reliable_textbook_match,
     load_audioscripts,
     normalize_book_path,
     render_problem_words_section_cn,
@@ -48,6 +50,33 @@ def _slow_identity(value: str) -> str:
 
 
 class PipelineHelperTests(unittest.TestCase):
+    def test_is_reliable_textbook_match_rejects_low_confidence_or_ambiguous_results(self) -> None:
+        self.assertFalse(is_reliable_textbook_match([]))
+        self.assertFalse(
+            is_reliable_textbook_match(
+                [
+                    {"score": 0.22, "track_num": "5.05", "unit": 5},
+                    {"score": 0.21, "track_num": "5.06", "unit": 5},
+                ]
+            )
+        )
+        self.assertFalse(
+            is_reliable_textbook_match(
+                [
+                    {"score": 0.46, "track_num": "5.05", "unit": 5},
+                    {"score": 0.42, "track_num": "5.06", "unit": 5},
+                ]
+            )
+        )
+        self.assertTrue(
+            is_reliable_textbook_match(
+                [
+                    {"score": 0.71, "track_num": "5.05", "unit": 5},
+                    {"score": 0.45, "track_num": "5.06", "unit": 5},
+                ]
+            )
+        )
+
     def test_normalize_book_path_resolves_current_book(self) -> None:
         base = Path("/repo/books")
         self.assertEqual(
@@ -407,6 +436,27 @@ class PipelineHelperTests(unittest.TestCase):
         self.assertIn("She's hiding, hiding, hiding. Can you see the kitten there?", expanded)
         self.assertNotIn("He's jumping, jumping, jumping like a rabbit.", expanded)
         self.assertNotIn("She's very slow. She's moving like a snail.", expanded)
+        self.assertNotIn("I'm Rocky-Doodle-Doo", expanded)
+
+    def test_expand_reference_span_drops_unread_leading_intro_line_when_opening_anchor_starts_later(self) -> None:
+        reference_text = "\n".join(
+            [
+                "Rocky: I'm Rocky-Doodle-Doo and ... here's our song for today: Moving like wild animals!",
+                "This is our wildlife park. We've got our masks.",
+                "And we're all moving like wild animals.",
+                "He's running, running, running like a lion.",
+            ]
+        )
+        transcript = (
+            "It is our wild park. We've got our masks and we're all moving like wild animals. "
+            "She's running, running, running like lion."
+        )
+
+        expanded = _expand_reference_span([("5.09", reference_text)], transcript, minimum_word_count=0)
+
+        self.assertNotIn("I'm Rocky-Doodle-Doo", expanded)
+        self.assertIn("This is our wildlife park. We've got our masks.", expanded)
+        self.assertIn("And we're all moving like wild animals.", expanded)
 
     def test_expand_reference_span_keeps_multiple_strong_clusters_in_same_track(self) -> None:
         reference_text = "\n".join(
@@ -663,7 +713,65 @@ class PipelineHelperTests(unittest.TestCase):
         self.assertIn("And", feedback_cn)
         self.assertIn("wildlife", feedback_cn)
         self.assertIn("jim's", feedback_cn)
-        self.assertIn("bringing", feedback_cn)
+        self.assertNotIn("bringing", feedback_cn)
+
+    def test_build_feedback_clues_adds_reference_line_type_and_tip(self) -> None:
+        reference_text = "\n".join(
+            [
+                'Is that Jim’s picture of the wildlife park?',
+                'Well, I don’t know which one’s the best, but the parrot’s the prettiest.',
+            ]
+        )
+        clues = build_feedback_clues(
+            problem_words=[
+                {"word": "Is", "error_type": "Omission", "score": 0},
+                {"word": "prettiest", "error_type": "Mispronunciation", "score": 9},
+            ],
+            reference_text=reference_text,
+            recognized_text="it that Jim's picture of the wildlife park ... the parrot's the prettiest",
+        )
+
+        self.assertEqual("Is", clues[0]["word"])
+        self.assertEqual("漏读", clues[0]["issue_label"])
+        self.assertEqual('Is that Jim’s picture of the wildlife park?', clues[0]["reference_line"])
+        self.assertIn("小词", clues[0]["practice_tip"])
+        self.assertEqual("prettiest", clues[1]["word"])
+        self.assertEqual("发音不清", clues[1]["issue_label"])
+        self.assertIn("最高级", clues[1]["practice_tip"])
+
+    def test_build_feedback_fallback_cn_uses_reference_line_and_issue_type(self) -> None:
+        feedback_cn = build_feedback_fallback_cn(
+            [
+                {
+                    "word": "Is",
+                    "error_type": "Omission",
+                    "score": 0,
+                    "reference_line": "Is that Jim’s picture of the wildlife park?",
+                    "issue_label": "漏读",
+                    "practice_tip": '这是句子开头的小词，起句时先慢一点，把 "Is" 单独带出来。',
+                    "recognized_hint": "",
+                },
+                {
+                    "word": "prettiest",
+                    "error_type": "Mispronunciation",
+                    "score": 9,
+                    "reference_line": "Well, I don’t know which one’s the best, but the parrot’s the prettiest.",
+                    "issue_label": "发音不清",
+                    "practice_tip": '这是最高级词尾，结尾的 /st/ 要收住，不要只读前半段。',
+                    "recognized_hint": "",
+                },
+            ],
+            {"fluency": 88, "completeness": 93},
+        )
+
+        self.assertIn("整体上你这次读得比较顺", feedback_cn)
+        self.assertIn('在 “Is that Jim’s picture of the wildlife park?” 这句里', feedback_cn)
+        self.assertIn('"Is" 这次漏掉了', feedback_cn)
+        self.assertIn('在 “Well, I don’t know which one’s the best, but the parrot’s the prettiest.” 这句里', feedback_cn)
+        self.assertIn('"prettiest" 已经读出来了', feedback_cn)
+        self.assertIn("最高级词尾", feedback_cn)
+        self.assertNotIn("妈妈", feedback_cn)
+        self.assertNotIn("听起来有点像", feedback_cn)
 
     def test_feedback_contradiction_detector_rejects_praising_problem_words(self) -> None:
         problem_words = [
@@ -753,6 +861,13 @@ class PipelineHelperTests(unittest.TestCase):
         self.assertIn('如果引用英文词，必须保持英文原样，例如 "it"', prompt)
         self.assertIn('不要把这些英文词翻译成中文', prompt)
         self.assertIn('- "it" (Mispronunciation, score 20)', prompt)
+        self.assertIn("重点问题词线索", prompt)
+        self.assertIn("所在原句", prompt)
+        self.assertIn("练习提醒", prompt)
+        self.assertIn("你是一位AI英语老师", prompt)
+        self.assertIn("不要使用家长口吻", prompt)
+        self.assertIn("不要猜测具体读成了什么词", prompt)
+        self.assertIn("不要写“老师注意到”", prompt)
 
     @patch("moonspeak.pipeline.llm_chat_glm", side_effect=RuntimeError("glm disabled"))
     @patch("moonspeak.pipeline.llm_chat")
@@ -799,6 +914,33 @@ class PipelineHelperTests(unittest.TestCase):
         )
 
         self.assertEqual(result, llm_chat_mock.return_value)
+
+    @patch("moonspeak.pipeline.llm_chat_glm", side_effect=RuntimeError("glm disabled"))
+    @patch("moonspeak.pipeline.llm_chat")
+    def test_llm_generate_feedback_cn_falls_back_when_feedback_uses_teacher_roleplay(
+        self, llm_chat_mock, _llm_chat_glm_mock
+    ) -> None:
+        llm_chat_mock.return_value = (
+            '老师注意到你整体读得比较顺。'
+            '在 "Is" 这里要更注意，起句时不要漏掉。'
+            '在 "wildlife" 这里可以再慢一点，把每个部分都读清楚。'
+            '在 "prettiest" 这里要把词尾读完整。'
+        )
+
+        result = llm_generate_feedback_cn(
+            scores={"fluency": 88, "completeness": 93},
+            recognized_text="the friendly farm",
+            reference_text='Is that Jim’s picture of the wildlife park?\nThe parrot’s the prettiest.',
+            problem_words=[
+                {"word": "Is", "error_type": "Omission", "score": 0},
+                {"word": "wildlife", "error_type": "Mispronunciation", "score": 13},
+                {"word": "prettiest", "error_type": "Mispronunciation", "score": 9},
+            ],
+        )
+
+        self.assertNotIn("老师注意到", result)
+        self.assertNotIn("老师发现", result)
+        self.assertIn('"Is" 这次漏掉了', result)
 
     @patch("moonspeak.pipeline.llm_chat_glm", side_effect=RuntimeError("glm disabled"))
     @patch("moonspeak.pipeline.llm_chat", return_value='你把“它”读错了，需要再练习。')

@@ -12,7 +12,7 @@ from contextlib import redirect_stdout
 
 from dotenv import load_dotenv
 
-from moonspeak.pipeline import REPO_ROOT, assess_audio
+from moonspeak.pipeline import NoReliableMatchError, REPO_ROOT, assess_audio
 
 load_dotenv()
 
@@ -60,8 +60,8 @@ def build_run_result(
     }
 
 
-def _build_failure_result(error: str) -> dict[str, object]:
-    return {"success": False, "error": error}
+def _build_failure_result(error: str, *, error_type: str) -> dict[str, object]:
+    return {"success": False, "error_type": error_type, "error": error}
 
 
 def main(
@@ -77,13 +77,23 @@ def main(
 
     source_path = Path(args.audio_file).expanduser().resolve()
     if not source_path.exists() or not source_path.is_file():
-        print(json.dumps(_build_failure_result(f"Audio file not found: {source_path}"), ensure_ascii=False))
+        print(
+            json.dumps(
+                _build_failure_result(f"Audio file not found: {source_path}", error_type="runtime_failure"),
+                ensure_ascii=False,
+            )
+        )
         return 1
 
     run_date = date or datetime.now().strftime("%Y-%m-%d")
     server = (server_base or os.environ.get("SERVER", "")).strip()
     if not server:
-        print(json.dumps(_build_failure_result("SERVER is not configured in .env"), ensure_ascii=False))
+        print(
+            json.dumps(
+                _build_failure_result("SERVER is not configured in .env", error_type="runtime_failure"),
+                ensure_ascii=False,
+            )
+        )
         return 1
 
     try:
@@ -98,8 +108,11 @@ def main(
         report_path = Path(str(report_result["report_path"]))
         if not report_path.exists():
             raise FileNotFoundError(f"Report file not found: {report_path}")
+    except NoReliableMatchError as exc:
+        print(json.dumps(_build_failure_result(str(exc), error_type="no_reliable_match"), ensure_ascii=False))
+        return 1
     except Exception as exc:
-        print(json.dumps(_build_failure_result(str(exc)), ensure_ascii=False))
+        print(json.dumps(_build_failure_result(str(exc), error_type="runtime_failure"), ensure_ascii=False))
         return 1
 
     print(json.dumps(report_result, ensure_ascii=False))

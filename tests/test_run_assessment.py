@@ -9,6 +9,7 @@ from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
+from moonspeak.pipeline import NoReliableMatchError
 from moonspeak.run_assessment import (
     build_report_url,
     build_run_result,
@@ -87,6 +88,7 @@ class RunAssessmentTests(unittest.TestCase):
             payload["report_url"],
         )
         self.assertEqual(str(staged_dir / "Read_PB58.feedback.md"), payload["report_path"])
+        self.assertNotIn("error_type", payload)
 
     @patch("moonspeak.run_assessment.assess_audio")
     def test_main_keeps_pipeline_logs_out_of_stdout_json(self, assess_audio_mock) -> None:
@@ -134,7 +136,29 @@ class RunAssessmentTests(unittest.TestCase):
         payload = json.loads(output.getvalue())
         self.assertEqual(1, exit_code)
         self.assertFalse(payload["success"])
+        self.assertEqual("runtime_failure", payload["error_type"])
         self.assertIn("boom", payload["error"])
+
+    @patch("moonspeak.run_assessment.assess_audio")
+    def test_main_prints_no_reliable_match_failure_type(self, assess_audio_mock) -> None:
+        assess_audio_mock.side_effect = NoReliableMatchError("No reliable textbook match found")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            source = Path(tmp_dir) / "random.m4a"
+            source.write_bytes(b"audio")
+            output = io.StringIO()
+            with redirect_stdout(output):
+                exit_code = main(
+                    [str(source)],
+                    evaluations_root=Path(tmp_dir) / "evaluations",
+                    date="2026-04-15",
+                    server_base="http://127.0.0.1:6001",
+                )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(1, exit_code)
+        self.assertFalse(payload["success"])
+        self.assertEqual("no_reliable_match", payload["error_type"])
+        self.assertIn("No reliable textbook match found", payload["error"])
 
 
 class RunAssessmentScriptTests(unittest.TestCase):
@@ -179,6 +203,36 @@ class RunAssessmentScriptTests(unittest.TestCase):
         self.assertEqual(0, result.returncode)
         self.assertEqual("http://127.0.0.1:6001/speech/2026-04-15/Read_PB60", result.stdout.strip())
 
+    def test_shell_wrapper_prints_typed_failure_message_from_json_stdout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            fake_conda = Path(tmp_dir) / "conda"
+            fake_conda.write_text(
+                "#!/usr/bin/env bash\n"
+                "shift\n"
+                "shift\n"
+                "shift\n"
+                "shift\n"
+                "shift\n"
+                "shift\n"
+                "shift\n"
+                "printf '%s\\n' '{\"success\": false, \"error_type\": \"no_reliable_match\", \"error\": \"No reliable textbook match found\"}'\n",
+                encoding="utf-8",
+            )
+            fake_conda.chmod(0o755)
+
+            env = {**os.environ, "PATH": f"{tmp_dir}:{os.environ['PATH']}"}
+            result = subprocess.run(
+                ["bash", "scripts/run_assessment.sh", "/tmp/fake.m4a"],
+                cwd=Path(__file__).resolve().parents[1],
+                text=True,
+                capture_output=True,
+                env=env,
+                check=False,
+            )
+
+        self.assertEqual(1, result.returncode)
+        self.assertEqual("no_reliable_match: No reliable textbook match found", result.stdout.strip())
+
 
 class RunAssessmentSkillTests(unittest.TestCase):
     def test_repo_skill_documents_complete_assessment_flow(self) -> None:
@@ -189,6 +243,22 @@ class RunAssessmentSkillTests(unittest.TestCase):
         self.assertIn("SERVER", content)
         self.assertIn("server/start.sh", content)
         self.assertIn("scripts/run_assessment.sh", content)
+
+
+class WatchIMsgScriptTests(unittest.TestCase):
+    def test_watch_script_uses_env_config_without_private_defaults(self) -> None:
+        script_path = Path(__file__).resolve().parents[1] / "scripts" / "watch-imsg.sh"
+
+        self.assertTrue(script_path.exists())
+        content = script_path.read_text(encoding="utf-8")
+        self.assertIn('IMSG_CHAT_ID:-', content)
+        self.assertIn('IMSG_SENDER:-', content)
+        self.assertIn('TELEGRAM_TARGET:-', content)
+        self.assertIn("IMSG_SUCCESS_TEXT", content)
+        self.assertIn("TELEGRAM_FAILURE_TEXT", content)
+        self.assertNotIn("moonstringpeng@icloud.com", content)
+        self.assertNotIn("5581280352", content)
+        self.assertNotIn("女儿", content)
 
 
 if __name__ == "__main__":
